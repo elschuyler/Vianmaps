@@ -11,9 +11,13 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -23,31 +27,19 @@ import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Description
-import androidx.compose.material.icons.filled.EditLocation
 import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.Layers
-import androidx.compose.material.icons.filled.Map
-import androidx.compose.material.icons.filled.Navigation
 import androidx.compose.material.icons.filled.PinDrop
-import androidx.compose.material.icons.filled.Place
 import androidx.compose.material.icons.filled.Route
-import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
-import androidx.compose.material.icons.filled.Straighten
 import androidx.compose.material.icons.filled.Tune
-import androidx.compose.material.icons.filled.WbSunny
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -56,22 +48,29 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.example.map.source.MapSourceRepository
 import com.example.map.source.MapStyleDefinition
 import com.example.ui.screens.ActiveModal
-import com.example.ui.theme.AccentAmber
-import com.example.ui.theme.AccentTeal
-import com.example.ui.theme.SlateDark700
-import com.example.ui.theme.SlateDark800
-import com.example.ui.theme.SlateDark900
-import com.example.ui.theme.SurfaceBorderDark
+import com.example.ui.theme.IndicatorAlert
+import com.example.ui.theme.SkyBlueBorder
+import com.example.ui.theme.SkyBlueDim
+import com.example.ui.theme.SkyBlueLight
+import com.example.ui.theme.SkyBluePrimary
+import com.example.ui.theme.SurfaceBorderLight
+import com.example.ui.theme.SurfaceOffWhite
+import com.example.ui.theme.SurfaceWhite
+import com.example.ui.theme.SurfaceWhiteTranslucent
+import com.example.ui.theme.TextDarkMuted
+import com.example.ui.theme.TextDarkPrimary
+import com.example.ui.theme.TextDarkSecondary
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AppModalManager(
     activeModal: ActiveModal?,
@@ -83,14 +82,8 @@ fun AppModalManager(
     onOpenTool: (name: String, desc: String) -> Unit,
     onOpenMemoryPalace: () -> Unit
 ) {
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-
     if (quickSettingsOpen) {
-        ModalBottomSheet(
-            onDismissRequest = onDismissQuickSettings,
-            containerColor = SlateDark800,
-            sheetState = sheetState
-        ) {
+        FloatingPopupDialog(onDismiss = onDismissQuickSettings) {
             QuickSettingsContent(onClose = onDismissQuickSettings)
         }
     }
@@ -102,11 +95,7 @@ fun AppModalManager(
             }
         }
         is ActiveModal.MapsPopup -> {
-            ModalBottomSheet(
-                onDismissRequest = onDismissModal,
-                containerColor = SlateDark800,
-                sheetState = sheetState
-            ) {
+            FloatingPopupDialog(onDismiss = onDismissModal) {
                 MapsPopupContent(
                     currentStyle = currentStyle,
                     onSelectStyle = onSelectStyle,
@@ -115,11 +104,7 @@ fun AppModalManager(
             }
         }
         is ActiveModal.PlacesPopup -> {
-            ModalBottomSheet(
-                onDismissRequest = onDismissModal,
-                containerColor = SlateDark800,
-                sheetState = sheetState
-            ) {
+            FloatingPopupDialog(onDismiss = onDismissModal) {
                 PlacesPopupContent(
                     onOpenMemoryPalace = {
                         onDismissModal()
@@ -135,11 +120,7 @@ fun AppModalManager(
             }
         }
         is ActiveModal.ToolsPopup -> {
-            ModalBottomSheet(
-                onDismissRequest = onDismissModal,
-                containerColor = SlateDark800,
-                sheetState = sheetState
-            ) {
+            FloatingPopupDialog(onDismiss = onDismissModal) {
                 ToolsPopupContent(
                     onSelectTool = { name, desc ->
                         onDismissModal()
@@ -150,11 +131,53 @@ fun AppModalManager(
             }
         }
         is ActiveModal.PlaceholderTool -> {
-            FullScreenModal(title = activeModal.name, onClose = onDismissModal) {
-                ToolPlaceholderContent(name = activeModal.name, description = activeModal.description)
+            FloatingPopupDialog(onDismiss = onDismissModal) {
+                ToolPlaceholderContent(name = activeModal.name, description = activeModal.description, onClose = onDismissModal)
             }
         }
         null -> Unit
+    }
+}
+
+/**
+ * True Floating Popup Panel:
+ * - Appears as a compact card floating over the map.
+ * - Anchored in the lower-middle viewport above the navigation controls.
+ * - Does NOT stretch to the bottom or sides of the screen.
+ * - Pure white surface with crisp borders, rounded 20dp corners, and Sky Blue accents.
+ * - Dismisses cleanly on tap outside.
+ */
+@Composable
+fun FloatingPopupDialog(
+    onDismiss: () -> Unit,
+    content: @Composable () -> Unit
+) {
+    val dialogShape = RoundedCornerShape(20.dp)
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .clickable { onDismiss() }
+                .padding(horizontal = 16.dp, vertical = 72.dp)
+                .navigationBarsPadding(),
+            contentAlignment = Alignment.BottomStart
+        ) {
+            Box(
+                modifier = Modifier
+                    .widthIn(min = 280.dp, max = 360.dp)
+                    .clip(dialogShape)
+                    .background(SurfaceWhite)
+                    .border(1.dp, SurfaceBorderLight, dialogShape)
+                    .clickable(enabled = false) {} // Prevent click-through
+                    .padding(16.dp)
+            ) {
+                content()
+            }
+        }
     }
 }
 
@@ -167,32 +190,37 @@ fun FullScreenModal(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(SlateDark900)
+            .background(SurfaceWhite)
     ) {
-        Column(modifier = Modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .statusBarsPadding()
+                .navigationBarsPadding()
+        ) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(SlateDark800)
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                    .background(SurfaceWhite)
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                IconButton(onClick = onClose, modifier = Modifier.size(40.dp)) {
+                IconButton(onClick = onClose, modifier = Modifier.size(36.dp)) {
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                         contentDescription = "Back",
-                        tint = MaterialTheme.colorScheme.onSurface
+                        tint = TextDarkPrimary
                     )
                 }
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
                     text = title,
-                    fontSize = 18.sp,
+                    fontSize = 17.sp,
                     fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurface
+                    color = TextDarkPrimary
                 )
             }
-            HorizontalDivider(color = SurfaceBorderDark)
+            HorizontalDivider(color = SurfaceBorderLight)
             Box(modifier = Modifier.fillMaxSize().padding(16.dp)) {
                 content()
             }
@@ -202,56 +230,64 @@ fun FullScreenModal(
 
 @Composable
 fun QuickSettingsContent(onClose: () -> Unit) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(16.dp)
-    ) {
-        Text(
-            text = "Quick Settings",
-            fontSize = 16.sp,
-            fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.onSurface
-        )
-        Spacer(modifier = Modifier.height(12.dp))
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "Quick Settings",
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold,
+                color = TextDarkPrimary
+            )
+            IconButton(onClick = onClose, modifier = Modifier.size(28.dp)) {
+                Icon(Icons.Default.Close, contentDescription = "Close", tint = TextDarkSecondary, modifier = Modifier.size(18.dp))
+            }
+        }
+        Spacer(modifier = Modifier.height(10.dp))
 
         // Share Map Image action
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(8.dp))
-                .clickable { /* Handled below */ }
-                .padding(12.dp),
+                .clip(RoundedCornerShape(12.dp))
+                .background(SurfaceOffWhite)
+                .clickable { /* Action */ }
+                .padding(10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Icon(Icons.Default.Share, contentDescription = null, tint = AccentTeal)
-            Spacer(modifier = Modifier.width(12.dp))
+            Icon(Icons.Default.Share, contentDescription = null, tint = SkyBluePrimary, modifier = Modifier.size(20.dp))
+            Spacer(modifier = Modifier.width(10.dp))
             Column {
                 Text(
                     text = "Share Map Image (Visible Viewport)",
+                    fontSize = 13.sp,
                     fontWeight = FontWeight.Medium,
-                    color = MaterialTheme.colorScheme.onSurface
+                    color = TextDarkPrimary
                 )
                 Text(
                     text = "[Pending MapLibre Viewport Surface Capture integration in Milestone 2]",
-                    fontSize = 11.sp,
-                    color = AccentAmber
+                    fontSize = 10.sp,
+                    color = SkyBlueDim
                 )
             }
         }
 
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(6.dp))
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(8.dp))
+                .clip(RoundedCornerShape(12.dp))
+                .background(SurfaceOffWhite)
                 .clickable { onClose() }
-                .padding(12.dp),
+                .padding(10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Icon(Icons.Default.Tune, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
-            Spacer(modifier = Modifier.width(12.dp))
-            Text("Display & Gesture Calibration", color = MaterialTheme.colorScheme.onSurface)
+            Icon(Icons.Default.Tune, contentDescription = null, tint = SkyBluePrimary, modifier = Modifier.size(20.dp))
+            Spacer(modifier = Modifier.width(10.dp))
+            Text("Display & Gesture Calibration", fontSize = 13.sp, color = TextDarkPrimary)
         }
     }
 }
@@ -265,78 +301,107 @@ fun MapsPopupContent(
     var selectedTab by remember { mutableIntStateOf(0) }
     val tabs = listOf("Maps", "Layers", "Custom")
 
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(16.dp)
-    ) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "Map Sources & Styles",
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold,
+                color = TextDarkPrimary
+            )
+            IconButton(onClick = onClose, modifier = Modifier.size(28.dp)) {
+                Icon(Icons.Default.Close, contentDescription = "Close", tint = TextDarkSecondary, modifier = Modifier.size(18.dp))
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
         TabRow(
             selectedTabIndex = selectedTab,
-            containerColor = SlateDark800,
-            contentColor = AccentTeal
+            containerColor = SurfaceOffWhite,
+            contentColor = SkyBluePrimary
         ) {
             tabs.forEachIndexed { index, title ->
                 Tab(
                     selected = selectedTab == index,
                     onClick = { selectedTab = index },
-                    text = { Text(title, fontSize = 13.sp, fontWeight = FontWeight.SemiBold) }
+                    text = {
+                        Text(
+                            title,
+                            fontSize = 12.sp,
+                            fontWeight = if (selectedTab == index) FontWeight.Bold else FontWeight.Medium,
+                            color = if (selectedTab == index) SkyBluePrimary else TextDarkSecondary
+                        )
+                    }
                 )
             }
         }
 
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(12.dp))
 
         when (selectedTab) {
             0 -> {
-                Text("Base Styles (2D)", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
-                Spacer(modifier = Modifier.height(8.dp))
+                Text("Base Styles (2D)", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = TextDarkPrimary)
+                Spacer(modifier = Modifier.height(6.dp))
                 MapSourceRepository.availableStyles.forEach { style ->
                     val isSelected = style.id == currentStyle.id
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(if (isSelected) SlateDark700 else SlateDark800)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(if (isSelected) SkyBlueLight else SurfaceOffWhite)
+                            .border(
+                                width = if (isSelected) 1.dp else 0.dp,
+                                color = if (isSelected) SkyBlueBorder else Color.Transparent,
+                                shape = RoundedCornerShape(10.dp)
+                            )
                             .clickable { onSelectStyle(style) }
-                            .padding(12.dp),
+                            .padding(10.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
-                            Text(style.displayName, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
-                            Text(style.attribution, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(
+                                style.displayName,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = if (isSelected) SkyBlueDim else TextDarkPrimary
+                            )
+                            Text(style.attribution, fontSize = 10.sp, color = TextDarkSecondary)
                             if (style.isTemporaryDevelopmentStyle) {
-                                Text("Dev Style: Non-persistent tile license", fontSize = 10.sp, color = AccentAmber)
+                                Text("Dev Style: Non-persistent tile license", fontSize = 9.sp, color = TextDarkMuted)
                             }
                         }
                         if (isSelected) {
-                            Icon(Icons.Default.Check, contentDescription = "Selected", tint = AccentTeal)
+                            Icon(Icons.Default.Check, contentDescription = "Selected", tint = SkyBluePrimary, modifier = Modifier.size(18.dp))
                         }
                     }
-                    Spacer(modifier = Modifier.height(6.dp))
+                    Spacer(modifier = Modifier.height(4.dp))
                 }
 
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(6.dp))
                 Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 8.dp),
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(Icons.Default.Info, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(16.dp))
+                    Icon(Icons.Default.Info, contentDescription = null, tint = TextDarkMuted, modifier = Modifier.size(14.dp))
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text("3D Mode: Not part of Milestone 1 (Planned for future release)", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("3D Mode: Planned for future milestone", fontSize = 10.sp, color = TextDarkMuted)
                 }
             }
             1 -> {
-                Text("Map Overlays & Layers", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
-                Spacer(modifier = Modifier.height(8.dp))
-                Text("Independent layers (weather radar, contour lines, hiking tracks) are currently unavailable and planned for future milestones.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("Map Overlays & Layers", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = TextDarkPrimary)
+                Spacer(modifier = Modifier.height(6.dp))
+                Text("Independent layers (weather radar, contour lines, hiking tracks) are currently unavailable in Milestone 1.", fontSize = 11.sp, color = TextDarkSecondary)
             }
             2 -> {
-                Text("Custom Maps Workspace", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
-                Spacer(modifier = Modifier.height(8.dp))
-                Text("Custom MBTiles raster packs, GeoJSON imports, and offline packages will be configured here.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("Custom Maps Workspace", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = TextDarkPrimary)
+                Spacer(modifier = Modifier.height(6.dp))
+                Text("Custom MBTiles raster packs, GeoJSON imports, and offline packages will be configured here.", fontSize = 11.sp, color = TextDarkSecondary)
             }
         }
     }
@@ -347,13 +412,18 @@ fun PlacesPopupContent(
     onOpenMemoryPalace: () -> Unit,
     onClose: () -> Unit
 ) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(16.dp)
-    ) {
-        Text("Places & Records", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
-        Spacer(modifier = Modifier.height(12.dp))
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("Places & Records", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = TextDarkPrimary)
+            IconButton(onClick = onClose, modifier = Modifier.size(28.dp)) {
+                Icon(Icons.Default.Close, contentDescription = "Close", tint = TextDarkSecondary, modifier = Modifier.size(18.dp))
+            }
+        }
+        Spacer(modifier = Modifier.height(8.dp))
 
         PlaceItemRow(title = "Placemarks", icon = Icons.Default.PinDrop, subtitle = "0 saved landmarks")
         PlaceItemRow(title = "Routes", icon = Icons.Default.Route, subtitle = "0 recorded trails")
@@ -362,12 +432,16 @@ fun PlacesPopupContent(
         Spacer(modifier = Modifier.height(8.dp))
         Button(
             onClick = onOpenMemoryPalace,
-            colors = ButtonDefaults.buttonColors(containerColor = SlateDark700),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = SkyBluePrimary,
+                contentColor = Color.White
+            ),
+            shape = RoundedCornerShape(12.dp),
             modifier = Modifier.fillMaxWidth()
         ) {
-            Icon(Icons.Default.Bookmark, contentDescription = null, tint = AccentTeal)
+            Icon(Icons.Default.Bookmark, contentDescription = null, tint = Color.White, modifier = Modifier.size(18.dp))
             Spacer(modifier = Modifier.width(8.dp))
-            Text("Open Memory Palace Workspace", color = MaterialTheme.colorScheme.onSurface)
+            Text("Open Memory Palace Workspace", fontSize = 12.sp)
         }
     }
 }
@@ -377,14 +451,16 @@ private fun PlaceItemRow(title: String, icon: ImageVector, subtitle: String) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 8.dp),
+            .clip(RoundedCornerShape(8.dp))
+            .background(SurfaceOffWhite)
+            .padding(horizontal = 8.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Icon(icon, contentDescription = null, tint = AccentTeal)
-        Spacer(modifier = Modifier.width(12.dp))
+        Icon(icon, contentDescription = null, tint = SkyBluePrimary, modifier = Modifier.size(18.dp))
+        Spacer(modifier = Modifier.width(10.dp))
         Column {
-            Text(title, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
-            Text(subtitle, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(title, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = TextDarkPrimary)
+            Text(subtitle, fontSize = 10.sp, color = TextDarkSecondary)
         }
     }
 }
@@ -404,27 +480,36 @@ fun ToolsPopupContent(
         Pair("Signal & Information", "RF telemetry, network diagnostics, and GPS status")
     )
 
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(16.dp)
-    ) {
-        Text("Tools Menu", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
-        Spacer(modifier = Modifier.height(8.dp))
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("Tools Menu", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = TextDarkPrimary)
+            IconButton(onClick = onClose, modifier = Modifier.size(28.dp)) {
+                Icon(Icons.Default.Close, contentDescription = "Close", tint = TextDarkSecondary, modifier = Modifier.size(18.dp))
+            }
+        }
+        Spacer(modifier = Modifier.height(6.dp))
 
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        LazyColumn(
+            modifier = Modifier.heightIn(max = 280.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
             items(tools) { (name, desc) ->
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(8.dp))
+                        .background(SurfaceOffWhite)
                         .clickable { onSelectTool(name, desc) }
-                        .padding(12.dp),
+                        .padding(horizontal = 10.dp, vertical = 7.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Column {
-                        Text(name, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
-                        Text(desc, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(name, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = TextDarkPrimary)
+                        Text(desc, fontSize = 10.sp, color = TextDarkSecondary)
                     }
                 }
             }
@@ -435,37 +520,46 @@ fun ToolsPopupContent(
 @Composable
 fun SettingsScreenContent() {
     Column {
-        Text("Application Settings", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+        Text("Application Settings", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = SkyBluePrimary)
         Spacer(modifier = Modifier.height(8.dp))
-        Text("MapLibre Native Android Engine: Version 13.7.1", color = MaterialTheme.colorScheme.onSurface)
-        Text("Rendering Mode: 2D Orthographic MapView", color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text("Tile Cache Policy: Normal visible session cache (No bulk prefetching)", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("MapLibre Native Android Engine: Version 13.7.1", fontSize = 12.sp, color = TextDarkPrimary)
+        Text("Rendering Mode: 2D Orthographic MapView", fontSize = 11.sp, color = TextDarkSecondary)
+        Text("Tile Cache Policy: Normal visible session cache (No bulk prefetching)", fontSize = 11.sp, color = TextDarkSecondary)
         Spacer(modifier = Modifier.height(16.dp))
-        Text("Data & Privacy Boundaries", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+        Text("Data & Privacy Boundaries", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = SkyBluePrimary)
         Spacer(modifier = Modifier.height(8.dp))
-        Text("• No cloud accounts, server sync, or external tracking", color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text("• Location is accessed ONLY when explicitly enabled by user", color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text("• User records isolated into managed storage boundary", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("• No cloud accounts, server sync, or external tracking", fontSize = 11.sp, color = TextDarkSecondary)
+        Text("• Location is accessed ONLY when explicitly enabled by user", fontSize = 11.sp, color = TextDarkSecondary)
+        Text("• User records isolated into managed storage boundary", fontSize = 11.sp, color = TextDarkSecondary)
     }
 }
 
 @Composable
 fun MemoryPalaceContent() {
     Column {
-        Text("Memory Palace Workspace (Starting in Notes)", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+        Text("Memory Palace Workspace (Starting in Notes)", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = TextDarkPrimary)
         Spacer(modifier = Modifier.height(12.dp))
-        Text("Milestone 1 Placeholder:", fontWeight = FontWeight.SemiBold, color = AccentTeal)
-        Text("The full Spatial Notes and Memory Palace editor will be implemented in future milestones. Structured records will bind directly to the shared Room database.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("Milestone 1 Placeholder:", fontWeight = FontWeight.SemiBold, color = SkyBluePrimary)
+        Text("The full Spatial Notes and Memory Palace editor will be implemented in future milestones. Structured records will bind directly to the shared Room database.", fontSize = 12.sp, color = TextDarkSecondary)
     }
 }
 
 @Composable
-fun ToolPlaceholderContent(name: String, description: String) {
-    Column {
-        Text(name, fontSize = 16.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+fun ToolPlaceholderContent(name: String, description: String, onClose: () -> Unit) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(name, fontSize = 15.sp, fontWeight = FontWeight.Bold, color = TextDarkPrimary)
+            IconButton(onClick = onClose, modifier = Modifier.size(28.dp)) {
+                Icon(Icons.Default.Close, contentDescription = "Close", tint = TextDarkSecondary, modifier = Modifier.size(18.dp))
+            }
+        }
         Spacer(modifier = Modifier.height(8.dp))
-        Text(description, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Spacer(modifier = Modifier.height(16.dp))
-        Text("Feature scheduled for upcoming release phase. Clean architecture boundaries and repository bindings are in place.", fontSize = 12.sp, color = AccentAmber)
+        Text(description, fontSize = 12.sp, color = TextDarkSecondary)
+        Spacer(modifier = Modifier.height(12.dp))
+        Text("Feature scheduled for upcoming release phase. Clean architecture boundaries and repository bindings are in place.", fontSize = 11.sp, color = SkyBlueDim)
     }
 }

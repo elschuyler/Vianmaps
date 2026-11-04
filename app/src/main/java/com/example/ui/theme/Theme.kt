@@ -1,65 +1,40 @@
 package com.example.ui.theme
 
-import android.os.Build
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 
-private val DarkColorScheme = darkColorScheme(
-    primary = AccentTeal,
-    onPrimary = SlateDark900,
-    primaryContainer = SlateDark700,
-    onPrimaryContainer = AccentTeal,
-    secondary = AccentAmber,
-    onSecondary = SlateDark900,
-    background = SlateDark900,
-    onBackground = SlateTextPrimary,
-    surface = SlateDark800,
-    onSurface = SlateTextPrimary,
-    surfaceVariant = SlateDark700,
-    onSurfaceVariant = SlateTextSecondary,
-    outline = SlateDark600
-)
-
-private val LightColorScheme = lightColorScheme(
-    primary = AccentTealDim,
+// Consistent White & Sky Blue color scheme enforced across both system light and dark modes
+private val SkyBlueWhiteColorScheme = lightColorScheme(
+    primary = SkyBluePrimary,
     onPrimary = Color.White,
-    primaryContainer = Color(0xFFCCFBF1),
-    onPrimaryContainer = Color(0xFF134E4A),
-    secondary = AccentAmber,
+    primaryContainer = SkyBlueLight,
+    onPrimaryContainer = SkyBlueDim,
+    secondary = SkyBluePrimary,
     onSecondary = Color.White,
-    background = Color(0xFFF8FAFC),
-    onBackground = Color(0xFF0F172A),
-    surface = Color.White,
-    onSurface = Color(0xFF0F172A),
-    surfaceVariant = Color(0xFFE2E8F0),
-    onSurfaceVariant = Color(0xFF475569),
-    outline = Color(0xFFCBD5E1)
+    secondaryContainer = SkyBlueLight,
+    onSecondaryContainer = SkyBlueDim,
+    tertiary = SkyBlueDim,
+    onTertiary = Color.White,
+    background = SurfaceWhite,
+    onBackground = TextDarkPrimary,
+    surface = SurfaceWhite,
+    onSurface = TextDarkPrimary,
+    surfaceVariant = SurfaceOffWhite,
+    onSurfaceVariant = TextDarkSecondary,
+    outline = SkyBlueBorder,
+    outlineVariant = SurfaceBorderLight
 )
 
 @Composable
 fun MyApplicationTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
-    dynamicColor: Boolean = false, // Keep intentional tactical map styling consistent
+    darkTheme: Boolean = false, // Ignored: System theme must not alter the app's visual appearance
+    dynamicColor: Boolean = false, // Ignored: Dynamic color disabled to strictly preserve Sky Blue & White branding
     content: @Composable () -> Unit,
 ) {
-    val colorScheme = when {
-        dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
-            val context = LocalContext.current
-            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-        }
-        darkTheme -> DarkColorScheme
-        else -> LightColorScheme
-    }
-
     MaterialTheme(
-        colorScheme = colorScheme,
+        colorScheme = SkyBlueWhiteColorScheme,
         typography = Typography,
         content = content
     )

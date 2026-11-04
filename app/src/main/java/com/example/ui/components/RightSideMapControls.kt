@@ -3,10 +3,10 @@ package com.example.ui.components
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.GpsFixed
@@ -17,7 +17,6 @@ import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -25,20 +24,26 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
-import com.example.ui.theme.AccentAmber
-import com.example.ui.theme.AccentGreen
-import com.example.ui.theme.AccentRed
-import com.example.ui.theme.AccentTeal
-import com.example.ui.theme.SlateDark800
-import com.example.ui.theme.SurfaceBorderDark
+import com.example.ui.theme.IndicatorAlert
+import com.example.ui.theme.SkyBlueBorder
+import com.example.ui.theme.SkyBlueLight
+import com.example.ui.theme.SkyBluePrimary
+import com.example.ui.theme.SurfaceBorderLight
+import com.example.ui.theme.SurfaceWhiteTranslucent
+import com.example.ui.theme.TextDarkPrimary
+import com.example.ui.theme.TextDarkSecondary
 
 /**
- * Exactly five right-side map controls in strict order top to bottom:
- * 1. Internet On/Off
- * 2. GPS / Location mode
- * 3. Refresh Maps
- * 4. Zoom In
- * 5. Zoom Out
+ * Milestone 1.1 — Right-side map controls:
+ * - Removed the shared vertical container/bubble background.
+ * - Each control appears independently as a floating circular white button.
+ * - White surface with Sky Blue icons and active highlights.
+ * - Respects the strict order top to bottom:
+ *   1. Internet On/Off
+ *   2. GPS / Location mode
+ *   3. Refresh Maps
+ *   4. Zoom In
+ *   5. Zoom Out
  */
 @Composable
 fun RightSideMapControls(
@@ -51,83 +56,98 @@ fun RightSideMapControls(
     onZoomOut: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val shape = RoundedCornerShape(12.dp)
-
     Column(
-        modifier = modifier
-            .clip(shape)
-            .background(SlateDark800.copy(alpha = 0.94f))
-            .border(1.dp, SurfaceBorderDark, shape)
-            .padding(4.dp),
+        modifier = modifier,
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(4.dp)
+        verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         // 1. Internet On/Off
-        MapControlButton(
+        IndependentMapControlButton(
             icon = if (isInternetEnabled) Icons.Default.Wifi else Icons.Default.WifiOff,
             contentDescription = if (isInternetEnabled) "Internet On (App level)" else "Internet Off (App level)",
             testTag = "control_internet_toggle",
-            tint = if (isInternetEnabled) AccentGreen else AccentRed,
+            isActive = isInternetEnabled,
+            tint = if (isInternetEnabled) SkyBluePrimary else IndicatorAlert,
             onClick = onToggleInternet
         )
 
         // 2. GPS / Location mode
-        MapControlButton(
+        IndependentMapControlButton(
             icon = if (isLocationActive) Icons.Default.GpsFixed else Icons.Default.GpsOff,
             contentDescription = if (isLocationActive) "GPS Location Active" else "GPS Location Off",
             testTag = "control_gps_toggle",
-            tint = if (isLocationActive) AccentTeal else MaterialTheme.colorScheme.onSurfaceVariant,
+            isActive = isLocationActive,
+            tint = if (isLocationActive) SkyBluePrimary else TextDarkSecondary,
             onClick = onToggleLocation
         )
 
         // 3. Refresh Maps
-        MapControlButton(
+        IndependentMapControlButton(
             icon = Icons.Default.Refresh,
             contentDescription = "Refresh Visible Maps",
             testTag = "control_refresh_maps",
-            tint = AccentAmber,
+            isActive = false,
+            tint = SkyBluePrimary,
             onClick = onRefreshMaps
         )
 
         // 4. Zoom In
-        MapControlButton(
+        IndependentMapControlButton(
             icon = Icons.Default.Add,
             contentDescription = "Zoom In",
             testTag = "control_zoom_in",
-            tint = MaterialTheme.colorScheme.onSurface,
+            isActive = false,
+            tint = TextDarkPrimary,
             onClick = onZoomIn
         )
 
         // 5. Zoom Out
-        MapControlButton(
+        IndependentMapControlButton(
             icon = Icons.Default.Remove,
             contentDescription = "Zoom Out",
             testTag = "control_zoom_out",
-            tint = MaterialTheme.colorScheme.onSurface,
+            isActive = false,
+            tint = TextDarkPrimary,
             onClick = onZoomOut
         )
     }
 }
 
 @Composable
-private fun MapControlButton(
+private fun IndependentMapControlButton(
     icon: ImageVector,
     contentDescription: String,
     testTag: String,
+    isActive: Boolean,
     tint: androidx.compose.ui.graphics.Color,
     onClick: () -> Unit
 ) {
-    IconButton(
-        onClick = onClick,
+    val buttonShape = CircleShape
+
+    Box(
         modifier = Modifier
-            .size(44.dp)
-            .testTag(testTag)
+            .size(40.dp)
+            .clip(buttonShape)
+            .background(if (isActive) SkyBlueLight else SurfaceWhiteTranslucent)
+            .border(
+                width = 1.dp,
+                color = if (isActive) SkyBlueBorder else SurfaceBorderLight,
+                shape = buttonShape
+            ),
+        contentAlignment = Alignment.Center
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = contentDescription,
-            tint = tint,
-            modifier = Modifier.size(22.dp)
-        )
+        IconButton(
+            onClick = onClick,
+            modifier = Modifier
+                .size(40.dp)
+                .testTag(testTag)
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = contentDescription,
+                tint = tint,
+                modifier = Modifier.size(20.dp)
+            )
+        }
     }
 }

@@ -22,6 +22,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "Map App"
+rootProject.name = "Vian Maps"
 
 include(":app")

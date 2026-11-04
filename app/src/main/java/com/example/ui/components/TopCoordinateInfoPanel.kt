@@ -14,13 +14,14 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -32,8 +33,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.preferences.MapCameraState
-import com.example.ui.theme.SlateDark800
-import com.example.ui.theme.SurfaceBorderDark
+import com.example.ui.theme.SkyBlueLight
+import com.example.ui.theme.SkyBluePrimary
+import com.example.ui.theme.SurfaceBorderLight
+import com.example.ui.theme.SurfaceWhiteTranslucent
+import com.example.ui.theme.TextDarkMuted
+import com.example.ui.theme.TextDarkPrimary
+import com.example.ui.theme.TextDarkSecondary
 import java.util.Locale
 
 @Composable
@@ -45,74 +51,71 @@ fun TopCoordinateInfoPanel(
     onToggleCollapse: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val shape = RoundedCornerShape(14.dp)
+    val panelShape = RoundedCornerShape(14.dp)
 
     Column(
         modifier = modifier
-            .fillMaxWidth()
-            .clip(shape)
-            .background(SlateDark800.copy(alpha = 0.92f))
-            .border(1.dp, SurfaceBorderDark, shape)
+            .wrapContentWidth()
+            .widthIn(min = 210.dp, max = 320.dp)
+            .clip(panelShape)
+            .background(SurfaceWhiteTranslucent)
+            .border(1.dp, SurfaceBorderLight, panelShape)
             .animateContentSize()
             .clickable { onToggleCollapse() }
-            .padding(horizontal = 14.dp, vertical = 10.dp)
+            .padding(horizontal = 12.dp, vertical = 7.dp)
             .testTag("top_coordinate_panel")
     ) {
-        // Folded Header (Always visible)
+        // Folded Header (White background, Sky Blue accent, dark readable text)
         Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
+            modifier = Modifier.wrapContentWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column {
                 Text(
-                    text = String.format(Locale.US, "%.5f° N, %.5f° W", cameraState.latitude, -cameraState.longitude),
+                    text = String.format(Locale.US, "%.4f° N, %.4f° W", cameraState.latitude, -cameraState.longitude),
                     fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.Bold,
-                    fontSize = 13.sp,
-                    color = MaterialTheme.colorScheme.onSurface
+                    fontSize = 12.sp,
+                    color = TextDarkPrimary
                 )
                 Text(
-                    text = String.format(Locale.US, "Zoom: %.1f • Bearing: %.0f°", cameraState.zoom, cameraState.bearing),
+                    text = String.format(Locale.US, "Z: %.1f • %03.0f°", cameraState.zoom, cameraState.bearing),
                     fontFamily = FontFamily.Monospace,
-                    fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    fontSize = 10.sp,
+                    color = TextDarkSecondary
                 )
             }
 
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                // Sensor Board compact badge
-                Row(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f))
-                        .padding(horizontal = 6.dp, vertical = 3.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Sensors,
-                        contentDescription = "Sensor Board",
-                        modifier = Modifier.size(13.dp),
-                        tint = MaterialTheme.colorScheme.primary
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = "Sensors: Standby",
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                }
-
-                Spacer(modifier = Modifier.width(8.dp))
-
+            // Compact Sky-Blue Sensor Indicator
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(SkyBlueLight)
+                    .padding(horizontal = 5.dp, vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 Icon(
-                    imageVector = if (isCollapsed) Icons.Default.ExpandMore else Icons.Default.ExpandLess,
-                    contentDescription = if (isCollapsed) "Expand Information" else "Collapse Information",
-                    modifier = Modifier.size(18.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    imageVector = Icons.Default.Sensors,
+                    contentDescription = "Sensor Board",
+                    modifier = Modifier.size(11.dp),
+                    tint = SkyBluePrimary
+                )
+                Spacer(modifier = Modifier.width(3.dp))
+                Text(
+                    text = "Standby",
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = SkyBluePrimary
                 )
             }
+
+            Icon(
+                imageVector = if (isCollapsed) Icons.Default.ExpandMore else Icons.Default.ExpandLess,
+                contentDescription = if (isCollapsed) "Expand Information" else "Collapse Information",
+                modifier = Modifier.size(16.dp),
+                tint = TextDarkSecondary
+            )
         }
 
         // Expanded details
@@ -120,38 +123,36 @@ fun TopCoordinateInfoPanel(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 10.dp)
+                    .padding(top = 8.dp)
             ) {
-                Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "GPS / LOCATION STATUS",
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.primary
+                    text = "LOCATION STATUS",
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = SkyBluePrimary
                 )
                 Text(
                     text = locationStatusText,
-                    fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    fontSize = 10.sp,
+                    color = TextDarkSecondary
                 )
 
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(6.dp))
                 Text(
-                    text = "CACHE & NETWORK POLICY",
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.primary
+                    text = "NETWORK & CACHE",
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = SkyBluePrimary
                 )
                 Text(
-                    text = if (isInternetEnabled) "In-App Internet: ON (MapLibre live requests allowed)"
-                    else "In-App Internet: OFF (App-owned network blocked)",
-                    fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    text = if (isInternetEnabled) "In-App Internet: ON" else "In-App Internet: OFF (App Blocked)",
+                    fontSize = 10.sp,
+                    color = TextDarkSecondary
                 )
                 Text(
-                    text = "Sensor policy: GPS/Sensors inactive while panel is open",
-                    fontSize = 10.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
+                    text = "Sensors: Inactive in panel",
+                    fontSize = 9.sp,
+                    color = TextDarkMuted
                 )
             }
         }

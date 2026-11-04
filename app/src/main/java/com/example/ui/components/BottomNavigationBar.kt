@@ -6,20 +6,17 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CompassCalibration
 import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.Place
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -30,16 +27,20 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.ui.theme.AccentTeal
-import com.example.ui.theme.SlateDark800
-import com.example.ui.theme.SurfaceBorderDark
+import com.example.ui.theme.SkyBlueBorder
+import com.example.ui.theme.SkyBlueLight
+import com.example.ui.theme.SkyBluePrimary
+import com.example.ui.theme.SurfaceBorderLight
+import com.example.ui.theme.SurfaceWhiteTranslucent
+import com.example.ui.theme.TextDarkPrimary
+import com.example.ui.theme.TextDarkSecondary
 
 /**
- * Exactly four bottom-navigation buttons, left to right:
- * 1. Settings (tap -> full Settings, long-press -> quick-Settings)
- * 2. Maps (tap -> Maps popup with Maps, Layers, Custom tabs)
- * 3. Places (tap -> Places popup, long-press -> Memory Palace workspace placeholder in Notes)
- * 4. Compass / Tools (tap -> toggles North Lock / Free Rotation, long-press -> Tools popup list)
+ * Milestone 1.1 — Compact floating bottom navigation bar:
+ * - Pure crisp white pill background.
+ * - Sky blue highlights for selected / active states.
+ * - Distinct individual buttons with comfortable touch targets.
+ * - Keeps the existing button order: Settings, Maps, Places, Compass/Tools.
  */
 @Composable
 fun BottomNavigationBar(
@@ -53,22 +54,21 @@ fun BottomNavigationBar(
     onToolsLongClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val containerShape = RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp)
+    val pillShape = RoundedCornerShape(24.dp)
 
     Row(
         modifier = modifier
-            .fillMaxWidth()
-            .clip(containerShape)
-            .background(SlateDark800.copy(alpha = 0.96f))
-            .border(1.dp, SurfaceBorderDark, containerShape)
-            .navigationBarsPadding()
-            .padding(horizontal = 8.dp, vertical = 6.dp)
+            .wrapContentWidth()
+            .clip(pillShape)
+            .background(SurfaceWhiteTranslucent)
+            .border(1.dp, SurfaceBorderLight, pillShape)
+            .padding(horizontal = 6.dp, vertical = 4.dp)
             .testTag("bottom_nav_bar"),
-        horizontalArrangement = Arrangement.SpaceAround,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         // 1. Settings
-        BottomNavButton(
+        NavPillButton(
             label = "Settings",
             icon = Icons.Default.Settings,
             testTag = "nav_button_settings",
@@ -77,7 +77,7 @@ fun BottomNavigationBar(
         )
 
         // 2. Maps
-        BottomNavButton(
+        NavPillButton(
             label = "Maps",
             icon = Icons.Default.Map,
             testTag = "nav_button_maps",
@@ -86,7 +86,7 @@ fun BottomNavigationBar(
         )
 
         // 3. Places
-        BottomNavButton(
+        NavPillButton(
             label = "Places",
             icon = Icons.Default.Place,
             testTag = "nav_button_places",
@@ -94,9 +94,9 @@ fun BottomNavigationBar(
             onLongClick = onPlacesLongClick
         )
 
-        // 4. Compass / Tools
-        BottomNavButton(
-            label = if (isNorthLocked) "North Lock" else "Compass",
+        // 4. Compass / Tools (Sky-Blue highlighted when North Locked)
+        NavPillButton(
+            label = if (isNorthLocked) "Locked" else "Compass",
             icon = if (isNorthLocked) Icons.Default.Lock else Icons.Default.Explore,
             testTag = "nav_button_compass_tools",
             isActive = isNorthLocked,
@@ -108,7 +108,7 @@ fun BottomNavigationBar(
 
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
-private fun BottomNavButton(
+private fun NavPillButton(
     label: String,
     icon: ImageVector,
     testTag: String,
@@ -116,16 +116,22 @@ private fun BottomNavButton(
     onClick: () -> Unit,
     onLongClick: (() -> Unit)?
 ) {
-    val shape = RoundedCornerShape(10.dp)
+    val buttonShape = RoundedCornerShape(16.dp)
 
     Column(
         modifier = Modifier
-            .clip(shape)
+            .clip(buttonShape)
+            .background(if (isActive) SkyBlueLight else androidx.compose.ui.graphics.Color.Transparent)
+            .border(
+                width = if (isActive) 1.dp else 0.dp,
+                color = if (isActive) SkyBlueBorder else androidx.compose.ui.graphics.Color.Transparent,
+                shape = buttonShape
+            )
             .combinedClickable(
                 onClick = onClick,
                 onLongClick = onLongClick
             )
-            .padding(horizontal = 12.dp, vertical = 6.dp)
+            .padding(horizontal = 10.dp, vertical = 5.dp)
             .testTag(testTag),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
@@ -133,14 +139,14 @@ private fun BottomNavButton(
         Icon(
             imageVector = icon,
             contentDescription = label,
-            tint = if (isActive) AccentTeal else MaterialTheme.colorScheme.onSurface,
-            modifier = Modifier.size(24.dp)
+            tint = if (isActive) SkyBluePrimary else TextDarkPrimary,
+            modifier = Modifier.size(20.dp)
         )
         Text(
             text = label,
-            fontSize = 11.sp,
+            fontSize = 10.sp,
             fontWeight = if (isActive) FontWeight.Bold else FontWeight.Medium,
-            color = if (isActive) AccentTeal else MaterialTheme.colorScheme.onSurfaceVariant
+            color = if (isActive) SkyBluePrimary else TextDarkSecondary
         )
     }
 }

@@ -2,21 +2,24 @@ package com.example.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-// Tactical, map-first palette
-val SlateDark900 = Color(0xFF0D1117)
-val SlateDark800 = Color(0xFF161B22)
-val SlateDark700 = Color(0xFF21262D)
-val SlateDark600 = Color(0xFF30363D)
+// Milestone 1.1 — Unified Sky Blue & White Palette
+val SkyBluePrimary = Color(0xFF0284C7)      // Vibrant clear sky blue (primary accent)
+val SkyBlueLight = Color(0xFFE0F2FE)        // Very soft sky blue tint (selected container)
+val SkyBlueBorder = Color(0xFFBAE6FD)       // Soft sky blue border
+val SkyBlueDim = Color(0xFF0369A1)          // Deeper sky blue for high-contrast text
 
-val AccentTeal = Color(0xFF2DD4BF)
-val AccentTealDim = Color(0xFF14B8A6)
-val AccentAmber = Color(0xFFF59E0B)
-val AccentGreen = Color(0xFF22C55E)
-val AccentRed = Color(0xFFEF4444)
+// Surfaces & Backgrounds
+val SurfaceWhite = Color(0xFFFFFFFF)        // Pure crisp white
+val SurfaceWhiteTranslucent = Color(0xF7FFFFFF) // 97% white for floating pills/popups
+val SurfaceOffWhite = Color(0xFFF8FAFC)     // Subtle slate tint for secondary containers
+val SurfaceBorderLight = Color(0x260F172A)  // Crisp subtle dark border for white cards (15% slate)
 
-val SlateTextPrimary = Color(0xFFF0F6FC)
-val SlateTextSecondary = Color(0xFF8B949E)
-val SlateTextMuted = Color(0xFF6E7681)
+// Typography & Content Colors (Dark on White)
+val TextDarkPrimary = Color(0xFF0F172A)     // Dark charcoal for high readability
+val TextDarkSecondary = Color(0xFF475569)   // Slate gray for secondary labels
+val TextDarkMuted = Color(0xFF64748B)       // Muted slate gray for small timestamps/badges
 
-val SurfaceGlassDark = Color(0xEB161B22)
-val SurfaceBorderDark = Color(0x33F0F6FC)
+// Functional Indicators (aligned with Sky Blue palette)
+val IndicatorActive = Color(0xFF0284C7)     // Active GPS / Network / Compass
+val IndicatorInactive = Color(0xFF94A3B8)   // Inactive state slate
+val IndicatorAlert = Color(0xFFE11D48)      // Clear red for explicitly blocked network

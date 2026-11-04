@@ -6,21 +6,27 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -31,7 +37,6 @@ import com.example.ui.components.AppModalManager
 import com.example.ui.components.BottomNavigationBar
 import com.example.ui.components.RightSideMapControls
 import com.example.ui.components.TopCoordinateInfoPanel
-import com.example.ui.theme.SlateDark900
 import kotlinx.coroutines.launch
 import org.maplibre.android.MapLibre
 import org.maplibre.android.maps.MapView
@@ -101,26 +106,33 @@ fun MainMapScreen(
     Scaffold(
         modifier = modifier.fillMaxSize(),
         snackbarHost = { SnackbarHost(snackbarHostState) },
-        bottomBar = {
-            BottomNavigationBar(
-                isNorthLocked = uiState.camera.isNorthLocked,
-                onSettingsClick = { viewModel.openModal(ActiveModal.Settings) },
-                onSettingsLongClick = { viewModel.openQuickSettings() },
-                onMapsClick = { viewModel.openModal(ActiveModal.MapsPopup) },
-                onPlacesClick = { viewModel.openModal(ActiveModal.PlacesPopup) },
-                onPlacesLongClick = { viewModel.openModal(ActiveModal.MemoryPalaceWorkspace) },
-                onCompassToggleClick = { viewModel.toggleNorthLock() },
-                onToolsLongClick = { viewModel.openModal(ActiveModal.ToolsPopup) }
-            )
-        }
-    ) { innerPadding ->
+        containerColor = Color.Transparent
+    ) { _ ->
         Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(bottom = innerPadding.calculateBottomPadding())
-                .background(SlateDark900)
+            modifier = Modifier.fillMaxSize()
         ) {
-            // The Native MapLibre MapView hosted inside AndroidView
+            // The Native MapLibre MapView hosted inside AndroidView (full-bleed under all controls)
+            var mapViewRef by remember { androidx.compose.runtime.mutableStateOf<MapView?>(null) }
+            val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+
+            androidx.compose.runtime.DisposableEffect(lifecycleOwner, mapViewRef) {
+                val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+                    when (event) {
+                        androidx.lifecycle.Lifecycle.Event.ON_START -> mapViewRef?.onStart()
+                        androidx.lifecycle.Lifecycle.Event.ON_RESUME -> mapViewRef?.onResume()
+                        androidx.lifecycle.Lifecycle.Event.ON_PAUSE -> mapViewRef?.onPause()
+                        androidx.lifecycle.Lifecycle.Event.ON_STOP -> mapViewRef?.onStop()
+                        androidx.lifecycle.Lifecycle.Event.ON_DESTROY -> mapViewRef?.onDestroy()
+                        else -> Unit
+                    }
+                }
+                lifecycleOwner.lifecycle.addObserver(observer)
+                onDispose {
+                    lifecycleOwner.lifecycle.removeObserver(observer)
+                    mapViewRef?.onDestroy()
+                }
+            }
+
             AndroidView(
                 modifier = Modifier.fillMaxSize(),
                 factory = { ctx ->
@@ -133,12 +145,13 @@ fun MainMapScreen(
                                 onStyleLoaded = { /* Style ready */ }
                             )
                         }
+                        mapViewRef = this
                     }
                 },
-                update = { /* Map lifecycle handled via DisposableEffect below */ }
+                update = { /* MapView lifecycle managed via observer */ }
             )
 
-            // Top Coordinate & Info Panel (Collapsed by default, toggleable)
+            // Top-left Coordinate & Info Panel
             TopCoordinateInfoPanel(
                 cameraState = uiState.camera,
                 isCollapsed = uiState.isTopPanelCollapsed,
@@ -146,48 +159,103 @@ fun MainMapScreen(
                 locationStatusText = uiState.locationStatusText,
                 onToggleCollapse = { viewModel.toggleTopPanel() },
                 modifier = Modifier
-                    .align(Alignment.TopCenter)
+                    .align(Alignment.TopStart)
                     .statusBarsPadding()
-                    .padding(horizontal = 14.dp, vertical = 8.dp)
+                    .padding(start = 14.dp, top = 8.dp)
             )
 
-            // Right-side Map Controls (5 buttons strictly top to bottom)
-            RightSideMapControls(
-                isInternetEnabled = uiState.isInternetEnabled,
-                isLocationActive = uiState.isLocationActive,
-                onToggleInternet = {
-                    viewModel.toggleInternet()
-                    coroutineScope.launch {
-                        val status = if (!uiState.isInternetEnabled) "In-App Internet ON" else "In-App Internet OFF (Blocked)"
-                        snackbarHostState.showSnackbar(status)
-                    }
-                },
-                onToggleLocation = {
-                    viewModel.toggleLocationMode(
-                        onPermissionNeeded = {
-                            val finePerm = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION)
-                            if (finePerm == PackageManager.PERMISSION_GRANTED) {
-                                viewModel.setLocationPermissionGranted(true)
-                            } else {
-                                locationPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
-                            }
-                        }
-                    )
-                },
-                onRefreshMaps = {
-                    controller.refreshVisibleMap()
-                    coroutineScope.launch {
-                        snackbarHostState.showSnackbar("Refreshing visible map area...")
-                    }
-                },
-                onZoomIn = { controller.zoomIn() },
-                onZoomOut = { controller.zoomOut() },
+            // Top-right Compass Indicator (Reflects live map rotation, click resets to North-Up)
+            com.example.ui.components.MapCompassIndicator(
+                bearing = uiState.camera.bearing,
+                isNorthLocked = uiState.camera.isNorthLocked,
+                onResetNorth = { controller.resetNorth() },
                 modifier = Modifier
-                    .align(Alignment.CenterEnd)
-                    .padding(end = 12.dp)
+                    .align(Alignment.TopEnd)
+                    .statusBarsPadding()
+                    .padding(end = 14.dp, top = 8.dp)
             )
 
-            // Modals & Bottom sheets
+            // Mid-left Compact Map Scale Bar
+            com.example.ui.components.MapScaleBar(
+                latitude = uiState.camera.latitude,
+                zoom = uiState.camera.zoom,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .statusBarsPadding()
+                    .padding(start = 14.dp, top = 70.dp)
+            )
+
+            // Bottom-right Map Attribution Badge (Directly credits OpenFreeMap, OpenMapTiles, OpenStreetMap)
+            com.example.ui.components.MapAttributionBadge(
+                attributionText = uiState.currentStyle.attribution,
+                onClick = { viewModel.openModal(ActiveModal.MapsPopup) },
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .navigationBarsPadding()
+                    .padding(end = 12.dp, bottom = 246.dp)
+            )
+
+            // Bottom-aligned Control Layer
+            // - Bottom Navigation Pill shifted further LEFT
+            // - Independent circular Right-Side controls aligned near bottom-right
+            Row(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+                    .padding(start = 12.dp, end = 12.dp, bottom = 8.dp),
+                verticalAlignment = Alignment.Bottom,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                // Floating Bottom Navigation Pill (Shifted LEFT for thumb reach and right stack room)
+                BottomNavigationBar(
+                    isNorthLocked = uiState.camera.isNorthLocked,
+                    onSettingsClick = { viewModel.openModal(ActiveModal.Settings) },
+                    onSettingsLongClick = { viewModel.openQuickSettings() },
+                    onMapsClick = { viewModel.openModal(ActiveModal.MapsPopup) },
+                    onPlacesClick = { viewModel.openModal(ActiveModal.PlacesPopup) },
+                    onPlacesLongClick = { viewModel.openModal(ActiveModal.MemoryPalaceWorkspace) },
+                    onCompassToggleClick = { viewModel.toggleNorthLock() },
+                    onToolsLongClick = { viewModel.openModal(ActiveModal.ToolsPopup) },
+                    modifier = Modifier.padding(bottom = 2.dp)
+                )
+
+                // Right-side Map Controls (5 independent circular buttons aligned bottom-right)
+                RightSideMapControls(
+                    isInternetEnabled = uiState.isInternetEnabled,
+                    isLocationActive = uiState.isLocationActive,
+                    onToggleInternet = {
+                        viewModel.toggleInternet()
+                        coroutineScope.launch {
+                            val status = if (!uiState.isInternetEnabled) "In-App Internet ON" else "In-App Internet OFF (Blocked)"
+                            snackbarHostState.showSnackbar(status)
+                        }
+                    },
+                    onToggleLocation = {
+                        viewModel.toggleLocationMode(
+                            onPermissionNeeded = {
+                                val finePerm = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION)
+                                if (finePerm == PackageManager.PERMISSION_GRANTED) {
+                                    viewModel.setLocationPermissionGranted(true)
+                                } else {
+                                    locationPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+                                }
+                            }
+                        )
+                    },
+                    onRefreshMaps = {
+                        controller.refreshVisibleMap()
+                        coroutineScope.launch {
+                            snackbarHostState.showSnackbar("Refreshing visible map area...")
+                        }
+                    },
+                    onZoomIn = { controller.zoomIn() },
+                    onZoomOut = { controller.zoomOut() },
+                    modifier = Modifier.padding(bottom = 2.dp)
+                )
+            }
+
+            // Floating Popups & Modals (All unified in crisp White & Sky Blue)
             AppModalManager(
                 activeModal = uiState.activeModal,
                 quickSettingsOpen = uiState.quickSettingsOpen,

@@ -77,13 +77,19 @@ class MapEngineController(
         maplibreMap?.let { map ->
             map.uiSettings.isRotateGesturesEnabled = !locked
             if (locked) {
-                val current = map.cameraPosition
-                val update = CameraPosition.Builder(current)
-                    .bearing(0.0)
-                    .tilt(0.0)
-                    .build()
-                map.animateCamera(CameraUpdateFactory.newCameraPosition(update))
+                resetNorth()
             }
+        }
+    }
+
+    fun resetNorth() {
+        maplibreMap?.let { map ->
+            val current = map.cameraPosition
+            val update = CameraPosition.Builder(current)
+                .bearing(0.0)
+                .tilt(0.0)
+                .build()
+            map.animateCamera(CameraUpdateFactory.newCameraPosition(update))
         }
     }
 

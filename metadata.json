@@ -1,5 +1,5 @@
 {
-  "name": "Map App",
+  "name": "Vian Maps",
   "description": "Native Android MapLibre 2D interactive map foundation with controls, coordinates, and local preferences.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
