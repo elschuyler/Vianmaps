@@ -64,3 +64,21 @@
   - Verified workflow YAML syntax and structure.
 * **Deviations from request**: None.
 * **Known issues / follow-up**: None.
+
+### Entry: CI Debug Signing Fix and Log Investigation
+* **Timestamp**: 2026-11-03T22:10:00Z
+* **Summary**: Resolved GitHub Actions failure at `:app:validateSigningDebug` by configuring the `debug` buildType in `app/build.gradle.kts` to dynamically use Android's standard auto-generated debug signing (`signingConfigs.getByName("debug")`) whenever `debug.keystore` is not committed or present on the filesystem.
+* **Exact files touched**:
+  - `app/build.gradle.kts`
+* **What was actually done**:
+  - Investigated `app/build.gradle.kts`: `debug` buildType previously had hardcoded assignment to custom `debugConfig` which expected a committed `debug.keystore` in `${rootDir}`. Because `debug.keystore` is gitignored (per security rules), fresh checkouts in GitHub Actions runner lacked this file and failed at `:app:validateSigningDebug`.
+  - Updated `debug` buildType to safely check if `${rootDir}/debug.keystore` exists; if present (e.g. generated in AI Studio container), it uses `debugConfig`, otherwise it falls back directly to AGP's built-in `debug` signing config (`signingConfigs.getByName("debug")`).
+  - Investigated `google-services.json`: Noted plugin warning is handled non-fatally via `missingGoogleServicesStrategy = MissingGoogleServicesStrategy.WARN`. No Firebase setup is active or required for this milestone, ensuring clean execution without missing file errors.
+  - Investigated KSP logs: Confirmed non-fatal tooling behavior with no build regressions.
+  - Release signing block remains completely untouched and secure.
+* **How it was verified**:
+  - Ran `gradle clean assembleDebug` (Exit code 0, BUILD SUCCESSFUL in 12s).
+  - Verified target APK output at `app/build/outputs/apk/debug/app-debug.apk` (74,125,045 bytes).
+  - Verified local container compilation via `compile_applet` (SUCCEEDED).
+* **Deviations from request**: None.
+* **Known issues / follow-up**: None.
