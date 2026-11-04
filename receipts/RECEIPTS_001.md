@@ -48,3 +48,19 @@
 * **Known issues / follow-up**:
   - MapLibre Native C++ HTTP core handles tile requests directly. App-level `AppNetworkPolicy` controls and blocks all app-owned networking; full SDK socket interception will require custom OkHttp network interceptor injection in future milestones if supported by the SDK.
   - Viewport image capture in Quick Settings is marked as pending surface capture integration.
+
+### Entry: GitHub Actions APK Workflow Creation
+* **Timestamp**: 2026-11-03T22:01:00Z
+* **Summary**: Created GitHub Actions workflow `.github/workflows/build-debug-apk.yml` to build downloadable debug APK using Gradle 9.3.1, Temurin JDK 17, and upload artifact v4.
+* **Exact files touched**:
+  - `.github/workflows/build-debug-apk.yml`
+* **What was actually done**:
+  - Inspected existing Gradle wrapper configuration (Gradle 9.3.1).
+  - Verified local build output path for assembleDebug (`app/build/outputs/apk/debug/app-debug.apk`).
+  - Created `.github/workflows/build-debug-apk.yml` with push trigger to `main`, `workflow_dispatch`, JDK 17 (Temurin), Gradle 9.3.1 (`gradle/actions/setup-gradle@v4`), `gradle assembleDebug`, and `actions/upload-artifact@v4` packaging `app-debug`.
+  - Conducted silent security scan: confirmed no hardcoded secrets or exposed keys in the new workflow or workspace.
+* **How it was verified**:
+  - Verified `gradle assembleDebug` locally produces `app/build/outputs/apk/debug/app-debug.apk` with exit code 0.
+  - Verified workflow YAML syntax and structure.
+* **Deviations from request**: None.
+* **Known issues / follow-up**: None.
