@@ -10,6 +10,9 @@ import com.example.diagnostics.GlobalErrorCatcher
 import com.example.ui.screens.MainMapScreen
 import com.example.ui.screens.MapViewModel
 import com.example.ui.theme.MyApplicationTheme
+import com.example.diagnostics.DiagnosticRepository
+import com.example.diagnostics.LogSeverity
+import com.example.network.AppNetworkPolicy
 import org.maplibre.android.MapLibre
 
 class MainActivity : ComponentActivity() {
@@ -21,8 +24,27 @@ class MainActivity : ComponentActivity() {
         // Install global error catcher before any system or view initialization
         GlobalErrorCatcher.install()
 
+        // Stage 1: MapLibre initialization started
+        DiagnosticRepository.log(
+            severity = LogSeverity.INFO,
+            source = "MainActivity",
+            description = "MapLibre initialization started",
+            stage = "INIT_START"
+        )
+
         // Initialize MapLibre Native before View hierarchy is created
         MapLibre.getInstance(this)
+
+        // Stage 2: MapLibre initialization completed
+        DiagnosticRepository.log(
+            severity = LogSeverity.INFO,
+            source = "MainActivity",
+            description = "MapLibre initialization completed (version: 13.7.1)",
+            stage = "INIT_COMPLETE"
+        )
+
+        // Synchronize in-app network policy state to MapLibre core
+        MapLibre.setConnected(AppNetworkPolicy.isNetworkAllowed())
 
         // Force light status bar appearance (dark icons) so system bar icons remain readable
         enableEdgeToEdge(

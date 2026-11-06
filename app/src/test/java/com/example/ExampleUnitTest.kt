@@ -49,6 +49,26 @@ class ExampleUnitTest {
     val brightStyle = MapSourceRepository.getStyleById("openfreemap_bright")
     assertEquals("openfreemap_bright", brightStyle.id)
     assertTrue(brightStyle.attribution.contains("OpenFreeMap"))
+
+    val demoStyle = MapSourceRepository.getStyleById("maplibre_demo")
+    assertEquals("maplibre_demo", demoStyle.id)
+    assertEquals("MapLibre", demoStyle.providerName)
+    assertTrue(demoStyle.isTemporaryDevelopmentStyle)
+    assertTrue(demoStyle.styleUri.contains("demotiles.maplibre.org"))
+  }
+
+  @Test
+  fun verifyMapEngineStatusModel() {
+    val statuses = com.example.map.engine.MapEngineStatus.values()
+    assertEquals(8, statuses.size)
+    assertTrue(statuses.contains(com.example.map.engine.MapEngineStatus.INITIALIZING))
+    assertTrue(statuses.contains(com.example.map.engine.MapEngineStatus.WAITING_FOR_MAP_VIEW))
+    assertTrue(statuses.contains(com.example.map.engine.MapEngineStatus.LOADING_STYLE))
+    assertTrue(statuses.contains(com.example.map.engine.MapEngineStatus.STYLE_READY))
+    assertTrue(statuses.contains(com.example.map.engine.MapEngineStatus.RENDERING))
+    assertTrue(statuses.contains(com.example.map.engine.MapEngineStatus.FULLY_RENDERED))
+    assertTrue(statuses.contains(com.example.map.engine.MapEngineStatus.FAILED))
+    assertTrue(statuses.contains(com.example.map.engine.MapEngineStatus.RETRYING))
   }
 
   @Test

@@ -1,12 +1,13 @@
 package com.example.map.engine
 
 import android.content.Context
-import org.maplibre.android.MapLibre
+import com.example.diagnostics.DiagnosticRepository
+import com.example.diagnostics.LogSeverity
+import com.example.map.source.MapStyleDefinition
 import org.maplibre.android.camera.CameraPosition
 import org.maplibre.android.camera.CameraUpdateFactory
 import org.maplibre.android.geometry.LatLng
 import org.maplibre.android.maps.MapLibreMap
-import org.maplibre.android.maps.MapView
 import org.maplibre.android.maps.Style
 
 /**
@@ -26,7 +27,11 @@ class MapEngineController(
 
     var isNorthLocked: Boolean = false
 
-    fun attachMap(map: MapLibreMap, currentStyleUri: String, onStyleLoaded: () -> Unit) {
+    fun attachMap(
+        map: MapLibreMap,
+        styleDef: MapStyleDefinition,
+        onStatusChanged: (status: MapEngineStatus, stageDescription: String?, error: String?) -> Unit
+    ) {
         this.maplibreMap = map
 
         map.uiSettings.isLogoEnabled = true
@@ -34,6 +39,38 @@ class MapEngineController(
         map.uiSettings.isCompassEnabled = false // Custom compass bottom navigation control is used
         map.uiSettings.isRotateGesturesEnabled = !isNorthLocked
         map.uiSettings.isTiltGesturesEnabled = false // 2D flat mode
+
+        map.cameraPosition = CameraPosition.Builder()
+            .target(LatLng(initialLat, initialLng))
+            .zoom(initialZoom)
+            .bearing(if (isNorthLocked) 0.0 else initialBearing)
+            .tilt(0.0)
+            .build()
+
+        loadStyle(styleDef, onStatusChanged)
+
+        map.addOnCameraMoveListener {
+            val position = map.cameraPosition
+            val target = position.target
+            if (target != null) {
+                onCameraMoved(
+                    target.latitude,
+                    target.longitude,
+                    position.zoom,
+                    position.bearing
+                )
+            }
+        }
+    }
+
+    fun attachMap(map: MapLibreMap, currentStyleUri: String, onStyleLoaded: () -> Unit) {
+        this.maplibreMap = map
+
+        map.uiSettings.isLogoEnabled = true
+        map.uiSettings.isAttributionEnabled = true
+        map.uiSettings.isCompassEnabled = false
+        map.uiSettings.isRotateGesturesEnabled = !isNorthLocked
+        map.uiSettings.isTiltGesturesEnabled = false
 
         map.cameraPosition = CameraPosition.Builder()
             .target(LatLng(initialLat, initialLng))
@@ -58,6 +95,81 @@ class MapEngineController(
                 )
             }
         }
+    }
+
+    fun loadStyle(
+        styleDef: MapStyleDefinition,
+        onStatusChanged: ((status: MapEngineStatus, stageDescription: String?, error: String?) -> Unit)? = null
+    ) {
+        val map = maplibreMap ?: run {
+            onStatusChanged?.invoke(
+                MapEngineStatus.WAITING_FOR_MAP_VIEW,
+                "Map instance not attached yet",
+                null
+            )
+            return
+        }
+
+        // Stage 8: Selected map style ID and style URL
+        DiagnosticRepository.log(
+            severity = LogSeverity.INFO,
+            source = "MapEngineController",
+            description = "Selected map style ID: ${styleDef.id}, URL: ${styleDef.styleUri} (Provider: ${styleDef.providerName})",
+            stage = "STYLE_SELECTION"
+        )
+
+        // Stage 9: Style loading started
+        onStatusChanged?.invoke(
+            MapEngineStatus.LOADING_STYLE,
+            "Loading style: ${styleDef.displayName}",
+            null
+        )
+        DiagnosticRepository.log(
+            severity = LogSeverity.INFO,
+            source = "MapEngineController",
+            description = "Style loading started: ${styleDef.styleUri}",
+            stage = "STYLE_LOADING_STARTED"
+        )
+
+        map.setStyle(Style.Builder().fromUri(styleDef.styleUri)) { style ->
+            // Stage 10: Style loaded successfully
+            val layerCount = style.layers.size
+            val sourceCount = style.sources.size
+            DiagnosticRepository.log(
+                severity = LogSeverity.INFO,
+                source = "MapEngineController",
+                description = "Style loaded successfully (${styleDef.displayName}): $layerCount layers, $sourceCount sources",
+                stage = "STYLE_LOADED"
+            )
+            onStatusChanged?.invoke(
+                MapEngineStatus.STYLE_READY,
+                "Style loaded: ${styleDef.displayName} ($layerCount layers)",
+                null
+            )
+        }
+    }
+
+    fun retryOrRefresh(
+        styleDef: MapStyleDefinition,
+        onStatusChanged: (status: MapEngineStatus, stageDescription: String?, error: String?) -> Unit
+    ) {
+        val map = maplibreMap
+        if (map == null) {
+            onStatusChanged(
+                MapEngineStatus.WAITING_FOR_MAP_VIEW,
+                "Cannot refresh: MapView is not ready",
+                "MapView null reference"
+            )
+            return
+        }
+
+        DiagnosticRepository.log(
+            severity = LogSeverity.INFO,
+            source = "MapEngineController",
+            description = "Initiating map retry/refresh for style ${styleDef.displayName}",
+            stage = "RETRY"
+        )
+        loadStyle(styleDef, onStatusChanged)
     }
 
     fun zoomIn() {

@@ -28,10 +28,18 @@ object AppNetworkPolicy {
         val msg = "Network policy toggled to: " + if (enabled) "ONLINE" else "OFFLINE (App Blocked)"
         logDiagnostic(msg)
 
+        try {
+            if (org.maplibre.android.MapLibre.hasInstance()) {
+                org.maplibre.android.MapLibre.setConnected(enabled)
+            }
+        } catch (e: Throwable) {
+            // Handled safely before MapLibre singleton is initialized
+        }
+
         DiagnosticRepository.log(
             severity = if (enabled) LogSeverity.INFO else LogSeverity.WARNING,
             source = "AppNetworkPolicy",
-            description = msg
+            description = msg + " (MapLibre.setConnected: $enabled)"
         )
     }
 

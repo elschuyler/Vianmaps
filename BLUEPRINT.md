@@ -47,13 +47,27 @@
 - [x] Phase 2.2.2: Reference screenshot alignment (top DMS card, stepped scale ruler).
 - [x] Phase 2.3: Redesign bottom bar to compact left-anchored grey-translucent pill, individual circular floating bubbles for right-side controls, and lowering Zoom (-/+) beside bottom bar.
 - [x] Phase 2.4: Restore 4 original Milestone 1 buttons (Tune, Map, PinDrop, Explore/Tools) with tap & long-press, increase bar translucency (45%) and snugness, enlarge right-side bubbles to 48dp with sharper glyphs, and convert popups to in-canvas anchored popovers above the bar without dark scrim.
+- [x] Phase 2.5: Foldable top coordinate panel with chevron indicator, expanded decimal coordinate & camera telemetry readouts, and placeholder Sensor Panel button.
+- [x] Phase 2.6: Fix Blank MapLibre Base Map & Remove Attribution Banner (Correct MapView lifecycle ownership and host lifecycle sync, pre-register listeners before getMapAsync, add MapEngineStatus model, sync MapLibre.setConnected with network policy, add MapLibre Demo Tiles diagnostic style, and remove wide attribution banner while preserving native attribution control).
 
 ## 5. Ledger of Changes
 - 2026-11-06: Initialized BLUEPRINT.md.
 - 2026-11-06: Completed Phase 2.3 UI redesign execution.
-- 2026-11-06: Completed Phase 2.4:
-  - Restored the 4 original Milestone 1 buttons in `BottomNavigationBar.kt`: 1. Tune/Settings (tap -> Settings, long-press -> Quick Settings), 2. Map (tap -> Maps Popover), 3. PinDrop/Places (tap -> Places Popover, long-press -> Memory Palace), 4. Compass/Tools (tap -> North Lock, long-press -> Tools Popover).
-  - Reduced container footprint to `wrapContentWidth()` with ultra-compact `4.dp` horizontal and `3.dp` vertical padding, `2.dp` inter-button spacing, and 45% translucency (`Color(0x731E293B)`).
-  - Scaled `RightSideMapControls.kt` circular bubbles to 48dp with solid 1dp frosted border (`Color(0x55FFFFFF)`), 32dp Zoom In/Out glyphs, and matching 45% translucency.
-  - Refactored `FloatingPopupDialog` in `AppModalManager.kt` from a blocking window `Dialog` to an in-canvas anchored popover card resting directly above the bottom bar (`start = 8.dp, bottom = 58.dp`) with zero window-dimming scrim.
-  - Verified with clean compilation (`compile_applet`) and 100% passing JVM unit tests (`testDebugUnitTest`).
+- 2026-11-06: Completed Phase 2.4 (4-button restoration, 45% translucency, 48dp bubbles, in-canvas popovers).
+- 2026-11-06: Completed Phase 2.5:
+  - Updated `TopCoordinateInfoPanel.kt` to be foldable on tap, featuring a chevron expand/collapse icon (`ExpandMore`/`ExpandLess`).
+  - Implemented high-precision decimal degrees formatter `formatDecimal` alongside DMS GPS notation.
+  - Added camera telemetry row (live Zoom level, Bearing angle, In-App Internet policy status).
+  - Integrated "Sensor Panel" action button in unfolded state wired to `onOpenSensorPanel()` callback.
+  - Wired in `MainMapScreen.kt` to open `ActiveModal.PlaceholderTool("Sensor Panel", ...)` anchored popover.
+  - Verified with `compile_applet` and local unit test suite (`testDebugUnitTest`).
+- 2026-11-06: Completed Phase 2.6 (Blank Base Map Fix & Attribution Banner Removal):
+  - Created `MapEngineStatus` enum model (8 unambiguous states: INITIALIZING, WAITING_FOR_MAP_VIEW, LOADING_STYLE, STYLE_READY, RENDERING, FULLY_RENDERED, FAILED, RETRYING).
+  - Resolved root cause of blank pale beige base map: MapView hosted in `AndroidView` was missing initial `onStart()` / `onResume()` calls because `LifecycleEventObserver` only catches future transitions after Activity is already resumed. Fixed by actively synchronizing with `lifecycleOwner.lifecycle.currentState` upon creation.
+  - Established single lifecycle ownership with guarded `safeDestroy()` and memory callback forwarding (`onLowMemory`).
+  - Pre-registered all diagnostic listeners (`OnWillStartLoadingMapListener`, `OnDidFinishLoadingStyleListener`, `OnDidFinishRenderingFrameListener`, `OnDidFinishRenderingMapListener`, `OnDidFailLoadingMapListener`, `OnRenderErrorListener`, `OnShaderCompileFailedListener`, `OnGlyphsErrorListener`, `OnSpriteErrorListener`, `OnDidBecomeIdleListener`) before `onCreate()` and `getMapAsync()`, logging all 13 required stages into `DiagnosticRepository`.
+  - Added `MAPLIBRE_DEMO_TILES` as temporary lightweight diagnostic test style.
+  - Synchronized `MapLibre.setConnected` with in-app network policy state.
+  - Connected right-side refresh control to `retryOrRefreshMap(controller)` with in-place reloading.
+  - Removed wide horizontal `MapAttributionBadge` banner from main screen while preserving MapLibre native attribution button and logo.
+  - Verified local compilation (`compile_applet`), unit tests (`testDebugUnitTest` 8/8 passed), and debug APK build (`assembleDebug`).

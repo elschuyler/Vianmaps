@@ -321,8 +321,69 @@
 * **How it was verified**:
   - Local build verified with `compile_applet` (SUCCEEDED).
   - Local JVM unit test suite verified via `gradle :app:testDebugUnitTest` (7 tests completed, 0 failed, BUILD SUCCESSFUL in 9s).
-* **Deviations from request**: None. Built exactly to finalized specifications.
 * **Known issues / follow-up**: None.
 
+### Entry: Phase 2.5 — Foldable Top Coordinate Panel & Sensor Panel Action Button
+* **Timestamp**: 2026-11-06T11:46:00Z
+* **Summary**: Upgraded top coordinate panel to be foldable on tap with an interactive chevron indicator, revealing high-precision decimal coordinates, camera telemetry (Zoom/Bearing/Internet policy status), and an action button for the upcoming Sensor Panel wired to a placeholder popover.
+* **Exact files touched**:
+  - `BLUEPRINT.md`
+  - `app/src/main/java/com/example/ui/components/TopCoordinateInfoPanel.kt`
+  - `app/src/main/java/com/example/ui/screens/MainMapScreen.kt`
+  - `receipts/RECEIPTS_001.md`
+* **What was actually done**:
+  - Redesigned `TopCoordinateInfoPanel.kt` header row with GPS DMS coordinate readout and a trailing fold indicator chevron (`Icons.Default.ExpandMore` when collapsed, `Icons.Default.ExpandLess` when expanded).
+  - Implemented `formatDecimal` to display decimal degrees with hemisphere notation (e.g. `39.52786° N, 31.84537° E`) in monospace font.
+  - Added live camera and network telemetry breakdown row (Zoom level to 1 decimal place, Bearing angle in degrees, In-App Internet allowed/blocked status).
+  - Embedded a styled Sky Blue "Sensor Panel" action button (`Icons.Default.Sensors`, `SkyBlueLight` background, `SkyBlueBorder`, `RoundedCornerShape(6.dp)`) inside the unfolded section.
+  - Wired `onOpenSensorPanel` in `MainMapScreen.kt` to trigger `ActiveModal.PlaceholderTool("Sensor Panel", ...)`, opening the non-blocking anchored popover card with full architecture decoupling for future sensor streaming.
+* **How it was verified**:
+  - Local build verified with `compile_applet` (SUCCEEDED).
+  - Local JVM unit test suite verified via `gradle :app:testDebugUnitTest` (7 tests completed, 0 failed, BUILD SUCCESSFUL in 13s).
+* **Deviations from request**: None. Built strictly to specifications.
 
-
+### Entry: Phase 2.6 — Blank MapLibre Base Map Fix & Attribution Banner Removal
+* **Timestamp**: 2026-11-06T12:51:00Z
+* **Summary**: Resolved blank pale beige base map by actively synchronizing MapView lifecycle with host Activity STARTED/RESUMED state upon creation, established single destruction ownership with safeDestroy() and onLowMemory handling, pre-registered all diagnostic listeners before getMapAsync() to record 13 lifecycle stages, introduced MapEngineStatus enum, synchronized MapLibre.setConnected with in-app network policy, added MapLibre Demo Tiles diagnostic style, and removed the wide MapAttributionBadge from the map canvas.
+* **Exact files touched**:
+  - `app/src/main/java/com/example/map/engine/MapEngineStatus.kt`
+  - `app/src/main/java/com/example/map/source/MapSourceRepository.kt`
+  - `app/src/main/java/com/example/ui/screens/MapViewModel.kt`
+  - `app/src/main/java/com/example/map/engine/MapEngineController.kt`
+  - `app/src/main/java/com/example/network/AppNetworkPolicy.kt`
+  - `app/src/main/java/com/example/MainActivity.kt`
+  - `app/src/main/java/com/example/ui/screens/MainMapScreen.kt`
+  - `app/src/test/java/com/example/ExampleUnitTest.kt`
+  - `BLUEPRINT.md`
+  - `receipts/RECEIPTS_001.md`
+* **What was actually done**:
+  - Identified root cause of blank pale beige base map on device: MapView hosted in Jetpack Compose `AndroidView` was created after the host Activity had already entered `RESUMED` state. The `LifecycleEventObserver` only intercepted subsequent state transitions, so `mapView.onStart()` and `mapView.onResume()` were never called, leaving the native OpenGL render loop and network tile loader paused.
+  - Corrected lifecycle synchronization in `MainMapScreen.kt`: Upon view creation, actively queried `lifecycleOwner.lifecycle.currentState` and immediately dispatched `mapView.onStart()` if `isAtLeast(STARTED)` and `mapView.onResume()` if `isAtLeast(RESUMED)`.
+  - Fixed duplicate destruction: Implemented `safeDestroy()` guard with `isDestroyed` flag ensuring `mapView.onDestroy()` is invoked exactly once between `Lifecycle.Event.ON_DESTROY` and `onDispose`.
+  - Added `ComponentCallbacks2` forwarding `onLowMemory()` and `onTrimMemory()` to `mapView.onLowMemory()`.
+  - Pre-registered all MapView listeners (`OnWillStartLoadingMapListener`, `OnDidFinishLoadingStyleListener`, `OnDidFinishRenderingFrameListener`, `OnDidFinishRenderingMapListener`, `OnDidFailLoadingMapListener`, `OnRenderErrorListener`, `OnShaderCompileFailedListener`, `OnGlyphsErrorListener`, `OnSpriteErrorListener`, `OnDidBecomeIdleListener`) before `onCreate()` and `getMapAsync()`.
+  - Logged all 13 required stages into `DiagnosticRepository`:
+    1. MapLibre initialization started (`MainActivity`)
+    2. MapLibre initialization completed (`MainActivity`)
+    3. MapView created (`MainMapScreen`)
+    4. MapView onCreate() completed (`MainMapScreen`)
+    5. Map lifecycle started (`MainMapScreen`)
+    6. getMapAsync() requested (`MainMapScreen`)
+    7. Map-ready callback received (`MainMapScreen`)
+    8. Selected map style ID and style URL (`MapEngineController`)
+    9. Style loading started (`MapEngineController`)
+    10. Style loaded successfully (`MapView` listener / `MapEngineController`)
+    11. First rendered frame received (`MapView.OnDidFinishRenderingFrameListener`)
+    12. Map fully rendered (`MapView.OnDidFinishRenderingMapListener`)
+    13. Map, resource, style or rendering failures (`OnDidFailLoadingMapListener`, `OnRenderErrorListener`, `OnShaderCompileFailedListener`, `OnGlyphsErrorListener`, `OnSpriteErrorListener`)
+  - Created `MapEngineStatus` enum with 8 states: `INITIALIZING`, `WAITING_FOR_MAP_VIEW`, `LOADING_STYLE`, `STYLE_READY`, `RENDERING`, `FULLY_RENDERED`, `FAILED`, `RETRYING`.
+  - Added `MAPLIBRE_DEMO_TILES` (`https://demotiles.maplibre.org/style.json`) as lightweight diagnostic vector style while preserving OpenFreeMap Liberty as default.
+  - Synchronized `MapLibre.setConnected(Boolean)` in `AppNetworkPolicy.setInternetEnabled`.
+  - Connected right-side refresh control to `retryOrRefreshMap(controller)` with in-place reloading.
+  - Removed wide horizontal `MapAttributionBadge` banner from main screen while preserving native MapLibre attribution info button and logo.
+* **How it was verified**:
+  - Local build verified with `compile_applet` (BUILD SUCCEEDED).
+  - Local JVM unit test suite verified via `gradle :app:testDebugUnitTest` (8 tests completed, 0 failed, BUILD SUCCESSFUL in 11s).
+  - Clean debug APK verified via `gradle assembleDebug` (BUILD SUCCESSFUL in 3s, output at `app/build/outputs/apk/debug/app-debug.apk`).
+* **Deviations from request**: None. Preserved existing layout, controls, and MapLibre native engine.
+* **Known issues / follow-up**: None.

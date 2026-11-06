@@ -53,6 +53,17 @@ object MapSourceRepository {
         licenseNotes = "OpenFreeMap positron muted vector style."
     )
 
+    // Temporary diagnostic vector style for rendering pipeline verification
+    val MAPLIBRE_DEMO_TILES = MapStyleDefinition(
+        id = "maplibre_demo",
+        displayName = "MapLibre Demo (Diagnostic)",
+        styleUri = "https://demotiles.maplibre.org/style.json",
+        attribution = "© MapLibre © OpenStreetMap contributors",
+        providerName = "MapLibre",
+        isTemporaryDevelopmentStyle = true,
+        licenseNotes = "Temporary lightweight diagnostic style (macro continental vector) used for engine rendering verification."
+    )
+
     // OpenStreetMap standard fallback style (rendered via MapLibre raster specification)
     val OSM_RASTER_DEV = MapStyleDefinition(
         id = "osm_raster",
@@ -68,6 +79,7 @@ object MapSourceRepository {
         OPEN_FREE_MAP_LIBERTY,
         OPEN_FREE_MAP_BRIGHT,
         OPEN_FREE_MAP_POSITRON,
+        MAPLIBRE_DEMO_TILES,
         OSM_RASTER_DEV
     )
 

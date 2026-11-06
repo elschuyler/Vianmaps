@@ -46,6 +46,13 @@ import kotlin.math.cos
 import kotlin.math.pow
 import kotlin.math.roundToInt
 
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.Sensors
+import androidx.compose.material3.HorizontalDivider
+import com.example.ui.theme.SkyBlueBorder
+import com.example.ui.theme.SkyBlueLight
+
 /**
  * Converts decimal degrees to standard GPS DMS format:
  * DD°MM'SS.SS" N/S  DD°MM'SS.SS" E/W
@@ -73,11 +80,25 @@ fun formatDms(latitude: Double, longitude: Double): String {
 }
 
 /**
+ * Converts decimal degrees to high-precision readable decimal notation:
+ * DD.DDDDD° N/S, DD.DDDDD° E/W
+ */
+fun formatDecimal(latitude: Double, longitude: Double): String {
+    val latHemisphere = if (latitude >= 0.0) "N" else "S"
+    val lngHemisphere = if (longitude >= 0.0) "E" else "W"
+    return String.format(
+        Locale.US,
+        "%.5f° %s, %.5f° %s",
+        abs(latitude), latHemisphere,
+        abs(longitude), lngHemisphere
+    )
+}
+
+/**
  * Top Coordinate Panel:
- * Exactly styled after reference image:
- * - Crisp white rectangular card with subtle 6dp rounded corners.
- * - Monospace, bold, dark coordinate readout.
- * - Minimal padding and content-sized footprint.
+ * - Foldable on tap: shows clean DMS coordinates by default with a subtle chevron indicator.
+ * - Unfolded state reveals high-precision decimal coordinates, live camera telemetry (Zoom/Bearing/Network),
+ *   and a dedicated "Sensor Panel" action button.
  */
 @Composable
 fun TopCoordinateInfoPanel(
@@ -86,6 +107,7 @@ fun TopCoordinateInfoPanel(
     isInternetEnabled: Boolean,
     locationStatusText: String,
     onToggleCollapse: () -> Unit,
+    onOpenSensorPanel: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val cardShape = RoundedCornerShape(6.dp)
@@ -101,26 +123,92 @@ fun TopCoordinateInfoPanel(
             .testTag("top_coordinate_panel")
     ) {
         Column {
-            Text(
-                text = formatDms(cameraState.latitude, cameraState.longitude),
-                fontFamily = FontFamily.Monospace,
-                fontWeight = FontWeight.Bold,
-                fontSize = 13.sp,
-                color = TextDarkPrimary,
-                maxLines = 1
-            )
+            // Primary Header Row: DMS Coordinates + chevron indicator
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = formatDms(cameraState.latitude, cameraState.longitude),
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 13.sp,
+                    color = TextDarkPrimary,
+                    maxLines = 1
+                )
+                Icon(
+                    imageVector = if (isCollapsed) Icons.Default.ExpandMore else Icons.Default.ExpandLess,
+                    contentDescription = if (isCollapsed) "Expand Details" else "Collapse Details",
+                    tint = TextDarkSecondary,
+                    modifier = Modifier.size(16.dp)
+                )
+            }
 
-            // Optional expanded diagnostic summary on click
+            // Unfolded telemetry breakdown & Sensor Panel action button
             AnimatedVisibility(visible = !isCollapsed) {
                 Column(
-                    modifier = Modifier
-                        .padding(top = 4.dp)
+                    modifier = Modifier.padding(top = 6.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    Text(
-                        text = "Status: $locationStatusText • In-App Net: ${if (isInternetEnabled) "ON" else "OFF"}",
-                        fontSize = 10.sp,
-                        color = TextDarkSecondary
+                    HorizontalDivider(
+                        color = SurfaceBorderLight,
+                        thickness = 0.5.dp,
+                        modifier = Modifier.padding(bottom = 2.dp)
                     )
+
+                    // Decimal degrees
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            text = "DEC:",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = SkyBluePrimary,
+                            fontFamily = FontFamily.Monospace
+                        )
+                        Text(
+                            text = formatDecimal(cameraState.latitude, cameraState.longitude),
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 11.sp,
+                            color = TextDarkPrimary
+                        )
+                    }
+
+                    // Zoom, Bearing, and Network telemetry
+                    Text(
+                        text = "Zoom: ${String.format(Locale.US, "%.1f", cameraState.zoom)} • Bearing: ${cameraState.bearing.toInt()}° • Net: ${if (isInternetEnabled) "ON" else "OFF"}",
+                        fontSize = 10.sp,
+                        color = TextDarkSecondary,
+                        fontFamily = FontFamily.Monospace
+                    )
+
+                    // Sensor Panel placeholder button
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(SkyBlueLight)
+                            .border(1.dp, SkyBlueBorder, RoundedCornerShape(6.dp))
+                            .clickable { onOpenSensorPanel() }
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Sensors,
+                            contentDescription = "Sensor Panel",
+                            tint = SkyBluePrimary,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Text(
+                            text = "Sensor Panel",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = SkyBluePrimary
+                        )
+                    }
                 }
             }
         }

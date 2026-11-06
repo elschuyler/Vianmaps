@@ -17,6 +17,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
+import com.example.map.engine.MapEngineController
+import com.example.map.engine.MapEngineStatus
+
 data class MapUiState(
     val camera: MapCameraState = MapCameraState(),
     val isTopPanelCollapsed: Boolean = true,
@@ -25,6 +28,7 @@ data class MapUiState(
     val isLocationActive: Boolean = false,
     val locationStatusText: String = "Location Off (Tap 2nd right control to request)",
     val isMapReady: Boolean = false,
+    val mapStatus: MapEngineStatus = MapEngineStatus.INITIALIZING,
     val mapLoadingStage: String = "INITIALIZING",
     val lastMapError: String? = null,
     val activeModal: ActiveModal? = null,
@@ -71,18 +75,66 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun onMapStageChanged(stage: String, isReady: Boolean? = null, error: String? = null) {
+    fun onMapStatusChanged(
+        status: MapEngineStatus,
+        stageDescription: String? = null,
+        error: String? = null
+    ) {
+        val stageLabel = stageDescription ?: status.label
+        val isReady = when (status) {
+            MapEngineStatus.STYLE_READY,
+            MapEngineStatus.RENDERING,
+            MapEngineStatus.FULLY_RENDERED -> true
+            MapEngineStatus.FAILED -> false
+            else -> _uiState.value.isMapReady
+        }
         _uiState.value = _uiState.value.copy(
-            mapLoadingStage = stage,
-            isMapReady = isReady ?: _uiState.value.isMapReady,
-            lastMapError = error ?: _uiState.value.lastMapError
+            mapStatus = status,
+            mapLoadingStage = stageLabel,
+            isMapReady = isReady,
+            lastMapError = error ?: if (status != MapEngineStatus.FAILED) null else _uiState.value.lastMapError
         )
-        val severity = if (error != null) LogSeverity.ERROR else LogSeverity.INFO
+
+        val severity = if (error != null || status == MapEngineStatus.FAILED) LogSeverity.ERROR else LogSeverity.INFO
+        val desc = buildString {
+            append("Map status -> [${status.name}] $stageLabel")
+            if (!error.isNullOrEmpty()) {
+                append(" | Error: $error")
+            }
+        }
         DiagnosticRepository.log(
             severity = severity,
             source = "MapEngine",
-            description = "Map stage -> $stage" + (error?.let { ": $it" } ?: ""),
-            stage = stage
+            description = desc,
+            stage = status.name
+        )
+    }
+
+    fun onMapStageChanged(stage: String, isReady: Boolean? = null, error: String? = null) {
+        val status = when (stage) {
+            "INITIALIZING" -> MapEngineStatus.INITIALIZING
+            "WAITING_FOR_MAP_VIEW" -> MapEngineStatus.WAITING_FOR_MAP_VIEW
+            "LOADING_STYLE", "Style Attached" -> MapEngineStatus.LOADING_STYLE
+            "Style Loaded" -> MapEngineStatus.STYLE_READY
+            "Rendering Frame" -> MapEngineStatus.RENDERING
+            "Fully Rendered" -> MapEngineStatus.FULLY_RENDERED
+            "Map Load Failed", "Render Error" -> MapEngineStatus.FAILED
+            "RETRYING" -> MapEngineStatus.RETRYING
+            else -> _uiState.value.mapStatus
+        }
+        onMapStatusChanged(status = status, stageDescription = stage, error = error)
+    }
+
+    fun retryOrRefreshMap(controller: MapEngineController) {
+        onMapStatusChanged(
+            status = MapEngineStatus.RETRYING,
+            stageDescription = "Retrying map render and style load"
+        )
+        controller.retryOrRefresh(
+            styleDef = _uiState.value.currentStyle,
+            onStatusChanged = { status, desc, err ->
+                onMapStatusChanged(status, desc, err)
+            }
         )
     }
 
@@ -198,14 +250,6 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
 
     fun closeQuickSettings() {
         _uiState.value = _uiState.value.copy(quickSettingsOpen = false)
-    }
-
-    fun onMapStageChanged(stage: String, error: String? = null, isReady: Boolean? = null) {
-        _uiState.value = _uiState.value.copy(
-            mapLoadingStage = stage,
-            lastMapError = error,
-            isMapReady = isReady ?: _uiState.value.isMapReady
-        )
     }
 
     override fun onCleared() {
