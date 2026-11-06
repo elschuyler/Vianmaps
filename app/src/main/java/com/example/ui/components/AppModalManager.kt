@@ -53,6 +53,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.example.map.source.MapSourceRepository
@@ -71,16 +72,24 @@ import com.example.ui.theme.TextDarkMuted
 import com.example.ui.theme.TextDarkPrimary
 import com.example.ui.theme.TextDarkSecondary
 
+import androidx.compose.material.icons.filled.Terminal
+import com.example.ui.screens.MapUiState
+
 @Composable
 fun AppModalManager(
     activeModal: ActiveModal?,
     quickSettingsOpen: Boolean,
     currentStyle: MapStyleDefinition,
+    uiState: MapUiState,
+    isDeviceOnline: Boolean,
+    connectionType: String,
     onSelectStyle: (MapStyleDefinition) -> Unit,
     onDismissModal: () -> Unit,
     onDismissQuickSettings: () -> Unit,
     onOpenTool: (name: String, desc: String) -> Unit,
-    onOpenMemoryPalace: () -> Unit
+    onOpenMemoryPalace: () -> Unit,
+    onOpenLogKeeper: () -> Unit,
+    onBackToSettings: () -> Unit
 ) {
     if (quickSettingsOpen) {
         FloatingPopupDialog(onDismiss = onDismissQuickSettings) {
@@ -91,7 +100,21 @@ fun AppModalManager(
     when (activeModal) {
         is ActiveModal.Settings -> {
             FullScreenModal(title = "Settings", onClose = onDismissModal) {
-                SettingsScreenContent()
+                SettingsScreenContent(
+                    onOpenLogKeeper = {
+                        onDismissModal()
+                        onOpenLogKeeper()
+                    }
+                )
+            }
+        }
+        is ActiveModal.LogKeeper -> {
+            FullScreenModal(title = "Log Keeper", onClose = onBackToSettings) {
+                LogKeeperScreenContent(
+                    uiState = uiState,
+                    isDeviceOnline = isDeviceOnline,
+                    connectionType = connectionType
+                )
             }
         }
         is ActiveModal.MapsPopup -> {
@@ -140,43 +163,50 @@ fun AppModalManager(
 }
 
 /**
- * True Floating Popup Panel:
- * - Appears as a compact card floating over the map.
- * - Anchored in the lower-middle viewport above the navigation controls.
- * - Does NOT stretch to the bottom or sides of the screen.
- * - Pure white surface with crisp borders, rounded 20dp corners, and Sky Blue accents.
- * - Dismisses cleanly on tap outside.
+ * In-Canvas Anchored Popover Panel:
+ * - Appears as a compact card anchored directly above the bottom navigation bar.
+ * - Leaves the map and right-side zoom controls visible and fully interactive.
+ * - Zero window-dimming scrim.
+ * - Pure white surface with crisp borders, rounded 16dp corners, and Sky Blue accents.
+ * - Fullscreen transparent backdrop allows effortless dismissal on tap outside.
  */
 @Composable
 fun FloatingPopupDialog(
     onDismiss: () -> Unit,
     content: @Composable () -> Unit
 ) {
-    val dialogShape = RoundedCornerShape(20.dp)
+    val popoverShape = RoundedCornerShape(16.dp)
 
-    Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false)
+    // Transparent non-dimming backdrop to capture outside taps for dismissal
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onDismiss
+            )
     ) {
+        // Popover card positioned directly above the left-anchored bottom navigation bar
         Box(
             modifier = Modifier
-                .fillMaxSize()
-                .clickable { onDismiss() }
-                .padding(horizontal = 16.dp, vertical = 72.dp)
-                .navigationBarsPadding(),
-            contentAlignment = Alignment.BottomStart
+                .align(Alignment.BottomStart)
+                .navigationBarsPadding()
+                .padding(start = 8.dp, bottom = 58.dp)
+                .widthIn(min = 280.dp, max = 340.dp)
+                .heightIn(max = 420.dp)
+                .clip(popoverShape)
+                .background(SurfaceWhite)
+                .border(1.dp, SurfaceBorderLight, popoverShape)
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    enabled = true,
+                    onClick = { /* Consume clicks inside card to prevent dismiss */ }
+                )
+                .padding(14.dp)
         ) {
-            Box(
-                modifier = Modifier
-                    .widthIn(min = 280.dp, max = 360.dp)
-                    .clip(dialogShape)
-                    .background(SurfaceWhite)
-                    .border(1.dp, SurfaceBorderLight, dialogShape)
-                    .clickable(enabled = false) {} // Prevent click-through
-                    .padding(16.dp)
-            ) {
-                content()
-            }
+            content()
         }
     }
 }
@@ -518,13 +548,44 @@ fun ToolsPopupContent(
 }
 
 @Composable
-fun SettingsScreenContent() {
+fun SettingsScreenContent(onOpenLogKeeper: () -> Unit = {}) {
     Column {
         Text("Application Settings", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = SkyBluePrimary)
         Spacer(modifier = Modifier.height(8.dp))
         Text("MapLibre Native Android Engine: Version 13.7.1", fontSize = 12.sp, color = TextDarkPrimary)
         Text("Rendering Mode: 2D Orthographic MapView", fontSize = 11.sp, color = TextDarkSecondary)
         Text("Tile Cache Policy: Normal visible session cache (No bulk prefetching)", fontSize = 11.sp, color = TextDarkSecondary)
+
+        Spacer(modifier = Modifier.height(16.dp))
+        Text("System Diagnostics & Telemetry", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = SkyBluePrimary)
+        Spacer(modifier = Modifier.height(8.dp))
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(SurfaceOffWhite)
+                .border(1.dp, SkyBlueBorder, RoundedCornerShape(12.dp))
+                .clickable { onOpenLogKeeper() }
+                .padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(Icons.Default.Terminal, contentDescription = "Log Keeper", tint = SkyBluePrimary, modifier = Modifier.size(24.dp))
+            Spacer(modifier = Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Open Log Keeper Workspace",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = TextDarkPrimary
+                )
+                Text(
+                    text = "Live diagnostic ring buffer, MapLibre SDK events, filtered search & export",
+                    fontSize = 10.sp,
+                    color = TextDarkSecondary
+                )
+            }
+        }
+
         Spacer(modifier = Modifier.height(16.dp))
         Text("Data & Privacy Boundaries", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = SkyBluePrimary)
         Spacer(modifier = Modifier.height(8.dp))

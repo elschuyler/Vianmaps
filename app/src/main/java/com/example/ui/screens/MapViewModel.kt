@@ -5,6 +5,9 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.preferences.AppPreferencesRepository
 import com.example.data.preferences.MapCameraState
+import com.example.diagnostics.DiagnosticRepository
+import com.example.diagnostics.LogSeverity
+import com.example.diagnostics.NetworkDiagnosticsMonitor
 import com.example.map.source.MapSourceRepository
 import com.example.map.source.MapStyleDefinition
 import com.example.network.AppNetworkPolicy
@@ -22,12 +25,15 @@ data class MapUiState(
     val isLocationActive: Boolean = false,
     val locationStatusText: String = "Location Off (Tap 2nd right control to request)",
     val isMapReady: Boolean = false,
+    val mapLoadingStage: String = "INITIALIZING",
+    val lastMapError: String? = null,
     val activeModal: ActiveModal? = null,
     val quickSettingsOpen: Boolean = false
 )
 
 sealed interface ActiveModal {
     data object Settings : ActiveModal
+    data object LogKeeper : ActiveModal
     data object MapsPopup : ActiveModal
     data object PlacesPopup : ActiveModal
     data object MemoryPalaceWorkspace : ActiveModal
@@ -38,11 +44,18 @@ sealed interface ActiveModal {
 class MapViewModel(application: Application) : AndroidViewModel(application) {
 
     private val preferencesRepository = AppPreferencesRepository(application)
+    val networkMonitor = NetworkDiagnosticsMonitor(application)
 
     private val _uiState = MutableStateFlow(MapUiState())
     val uiState: StateFlow<MapUiState> = _uiState.asStateFlow()
 
     init {
+        DiagnosticRepository.log(
+            severity = LogSeverity.INFO,
+            source = "MapViewModel",
+            description = "MapViewModel initialized"
+        )
+
         viewModelScope.launch {
             val savedPrefs = preferencesRepository.userPreferencesFlow.first()
             val style = MapSourceRepository.getStyleById(savedPrefs.selectedStyleId)
@@ -56,6 +69,21 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
                 currentStyle = style
             )
         }
+    }
+
+    fun onMapStageChanged(stage: String, isReady: Boolean? = null, error: String? = null) {
+        _uiState.value = _uiState.value.copy(
+            mapLoadingStage = stage,
+            isMapReady = isReady ?: _uiState.value.isMapReady,
+            lastMapError = error ?: _uiState.value.lastMapError
+        )
+        val severity = if (error != null) LogSeverity.ERROR else LogSeverity.INFO
+        DiagnosticRepository.log(
+            severity = severity,
+            source = "MapEngine",
+            description = "Map stage -> $stage" + (error?.let { ": $it" } ?: ""),
+            stage = stage
+        )
     }
 
     fun onCameraMoved(lat: Double, lng: Double, zoom: Double, bearing: Double) {
@@ -93,12 +121,16 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
     fun toggleLocationMode(onPermissionNeeded: () -> Unit) {
         val currentlyActive = _uiState.value.isLocationActive
         if (!currentlyActive) {
-            // User explicitly requested location mode
             onPermissionNeeded()
         } else {
             _uiState.value = _uiState.value.copy(
                 isLocationActive = false,
                 locationStatusText = "Location turned off"
+            )
+            DiagnosticRepository.log(
+                severity = LogSeverity.INFO,
+                source = "LocationManager",
+                description = "Location tracking disabled by user"
             )
         }
     }
@@ -109,10 +141,20 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
                 isLocationActive = true,
                 locationStatusText = "Location Standby (Active GPS is off until navigation)"
             )
+            DiagnosticRepository.log(
+                severity = LogSeverity.INFO,
+                source = "LocationManager",
+                description = "Location permission GRANTED"
+            )
         } else {
             _uiState.value = _uiState.value.copy(
                 isLocationActive = false,
                 locationStatusText = "Location Permission Denied"
+            )
+            DiagnosticRepository.log(
+                severity = LogSeverity.WARNING,
+                source = "LocationManager",
+                description = "Location permission DENIED by user"
             )
         }
     }
@@ -131,6 +173,12 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectStyle(style: MapStyleDefinition) {
         _uiState.value = _uiState.value.copy(currentStyle = style)
+        DiagnosticRepository.log(
+            severity = LogSeverity.INFO,
+            source = "MapSourceRepository",
+            description = "Selected style: ${style.displayName} (${style.providerName})",
+            stage = "STYLE_SWITCH"
+        )
         viewModelScope.launch {
             preferencesRepository.saveSelectedStyleId(style.id)
         }
@@ -150,5 +198,18 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
 
     fun closeQuickSettings() {
         _uiState.value = _uiState.value.copy(quickSettingsOpen = false)
+    }
+
+    fun onMapStageChanged(stage: String, error: String? = null, isReady: Boolean? = null) {
+        _uiState.value = _uiState.value.copy(
+            mapLoadingStage = stage,
+            lastMapError = error,
+            isMapReady = isReady ?: _uiState.value.isMapReady
+        )
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        networkMonitor.unregister()
     }
 }

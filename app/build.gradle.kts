@@ -13,7 +13,7 @@ android {
   compileSdk { version = release(36) { minorApiLevel = 1 } }
 
   defaultConfig {
-    applicationId = "shura.maps"
+    applicationId = "com.aistudio.applet.rkeejm"
     minSdk = 24
     targetSdk = 36
     versionCode = 1

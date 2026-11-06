@@ -50,4 +50,89 @@ class ExampleUnitTest {
     assertEquals("openfreemap_bright", brightStyle.id)
     assertTrue(brightStyle.attribution.contains("OpenFreeMap"))
   }
+
+  @Test
+  fun verifyDiagnosticRepositoryRingBufferCapacityAndRotation() {
+    val repo = com.example.diagnostics.DiagnosticRepository
+    repo.clear()
+    assertEquals(0, repo.getSnapshot().size)
+
+    // Add 260 entries (buffer capacity is 250)
+    for (i in 1..260) {
+      repo.record(com.example.diagnostics.DiagnosticRepository.Severity.INFO, "TestComponent", "Message #$i")
+    }
+
+    val snapshot = repo.getSnapshot()
+    assertEquals(250, snapshot.size)
+    // Oldest 10 entries (1..10) dropped, newest (260) must be present
+    assertTrue(snapshot.any { it.description == "Message #260" })
+    assertFalse(snapshot.any { it.description == "Message #1" })
+  }
+
+  @Test
+  fun verifyDiagnosticRepositorySeverityFiltering() {
+    val repo = com.example.diagnostics.DiagnosticRepository
+    repo.clear()
+
+    repo.record(com.example.diagnostics.DiagnosticRepository.Severity.INFO, "CompA", "Info message")
+    repo.record(com.example.diagnostics.DiagnosticRepository.Severity.WARNING, "CompB", "Warning message")
+    repo.record(com.example.diagnostics.DiagnosticRepository.Severity.ERROR, "CompC", "Error message")
+
+    val all = repo.getFiltered(null as com.example.diagnostics.DiagnosticRepository.Severity?)
+    assertEquals(3, all.size)
+
+    val errs = repo.getFiltered(com.example.diagnostics.DiagnosticRepository.Severity.ERROR)
+    assertEquals(1, errs.size)
+    assertEquals("Error message", errs.first().description)
+
+    val warns = repo.getFiltered(com.example.diagnostics.DiagnosticRepository.Severity.WARNING)
+    assertEquals(1, warns.size)
+    assertEquals("Warning message", warns.first().description)
+  }
+
+  @Test
+  fun verifyDiagnosticRepositorySanitization() {
+    val repo = com.example.diagnostics.DiagnosticRepository
+    repo.clear()
+
+    // Test secret / API key / token sanitization
+    repo.record(
+        com.example.diagnostics.DiagnosticRepository.Severity.INFO,
+        "Network",
+        "Request failed with key=AIzaSyA1234567890abcdef and token=secret_token_abc"
+    )
+
+    val lastEntry = repo.getSnapshot().last()
+    assertFalse(lastEntry.description.contains("AIzaSy"))
+    assertFalse(lastEntry.description.contains("secret_token_abc"))
+    assertTrue(lastEntry.description.contains("[REDACTED]"))
+
+    // Test coordinate sanitization
+    val sanitizedCoord = repo.sanitize("User location at 37.7749295, -122.4194155 precision")
+    assertFalse(sanitizedCoord.contains("37.7749295"))
+    assertTrue(sanitizedCoord.contains("[LAT/LNG_REDACTED]"))
+  }
+
+  @Test
+  fun verifyDiagnosticRepositoryExportReport() {
+    val repo = com.example.diagnostics.DiagnosticRepository
+    repo.clear()
+
+    repo.record(com.example.diagnostics.DiagnosticRepository.Severity.INFO, "Engine", "MapLibre initialized")
+    repo.record(com.example.diagnostics.DiagnosticRepository.Severity.ERROR, "Network", "Connection timed out")
+
+    val report = repo.exportDiagnosticReport(
+        currentStage = "Style Loaded",
+        lastError = null,
+        isDeviceOnline = true,
+        connectionType = "Wi-Fi"
+    )
+
+    assertTrue(report.contains("VIAN MAPS — SYSTEM DIAGNOSTIC REPORT"))
+    assertTrue(report.contains("Engine Stage: Style Loaded"))
+    assertTrue(report.contains("Device Online: true (Wi-Fi)"))
+    assertTrue(report.contains("Buffer Capacity: 250"))
+    assertTrue(report.contains("[INFO] [Engine] MapLibre initialized"))
+    assertTrue(report.contains("[ERROR] [Network] Connection timed out"))
+  }
 }

@@ -1,6 +1,8 @@
 {
-  "name": "Vian Maps",
-  "description": "Native Android MapLibre 2D interactive map foundation with controls, coordinates, and local preferences.",
+  "name": "Remix Vian Maps Native Foundation",
+  "description": "A native Android Kotlin application utilizing MapLibre for a performant, interactive 2D map foundation built with Jetpack Compose.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

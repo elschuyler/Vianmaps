@@ -1,5 +1,7 @@
 package com.example.network
 
+import com.example.diagnostics.DiagnosticRepository
+import com.example.diagnostics.LogSeverity
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -11,9 +13,8 @@ import kotlinx.coroutines.flow.asStateFlow
  * NOTE: Controls app-owned network activity ONLY; it does not change the
  * device's Wi-Fi or cellular connections.
  *
- * For third-party SDKs like MapLibre Native: MapLibre C++ core uses internal
- * HTTP loaders. While app-owned network features strictly check [isNetworkAllowed],
- * external SDK network isolation is tracked and reported via [diagnosticsLog].
+ * All logging is centralized in [DiagnosticRepository], with [diagnosticsLog]
+ * maintained as an adapter for backward compatibility.
  */
 object AppNetworkPolicy {
     private val _isInternetEnabled = MutableStateFlow(true)
@@ -24,7 +25,14 @@ object AppNetworkPolicy {
 
     fun setInternetEnabled(enabled: Boolean) {
         _isInternetEnabled.value = enabled
-        logDiagnostic("Network policy toggled to: " + if (enabled) "ONLINE" else "OFFLINE (App Blocked)")
+        val msg = "Network policy toggled to: " + if (enabled) "ONLINE" else "OFFLINE (App Blocked)"
+        logDiagnostic(msg)
+
+        DiagnosticRepository.log(
+            severity = if (enabled) LogSeverity.INFO else LogSeverity.WARNING,
+            source = "AppNetworkPolicy",
+            description = msg
+        )
     }
 
     fun isNetworkAllowed(): Boolean = _isInternetEnabled.value

@@ -101,11 +101,20 @@ class MapEngineController(
 
     fun refreshVisibleMap() {
         maplibreMap?.let { map ->
-            // Trigger style reload to refresh visible tiles subject to provider rules
             val currentStyle = map.style?.uri
             if (!currentStyle.isNullOrEmpty()) {
                 map.setStyle(Style.Builder().fromUri(currentStyle))
             }
+        }
+    }
+
+    fun centerOnLocation(lat: Double, lng: Double, zoom: Double? = null) {
+        maplibreMap?.let { map ->
+            val update = CameraPosition.Builder()
+                .target(LatLng(lat, lng))
+                .zoom(zoom ?: map.cameraPosition.zoom)
+                .build()
+            map.animateCamera(CameraUpdateFactory.newCameraPosition(update))
         }
     }
 }

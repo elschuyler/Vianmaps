@@ -8,13 +8,18 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.windowInsetsTopHeight
+import com.example.diagnostics.DiagnosticRepository
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -48,15 +53,18 @@ fun MainMapScreen(
 ) {
     val context = LocalContext.current
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val isDeviceOnline by viewModel.networkMonitor.isDeviceOnline.collectAsStateWithLifecycle()
+    val connectionType by viewModel.networkMonitor.connectionType.collectAsStateWithLifecycle()
     val coroutineScope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
 
-    // Handle back button for modals
+    // Handle back button for modals:
+    // Back from Log Keeper returns to Settings; Back from Settings returns to Map
     BackHandler(enabled = uiState.activeModal != null || uiState.quickSettingsOpen) {
-        if (uiState.quickSettingsOpen) {
-            viewModel.closeQuickSettings()
-        } else {
-            viewModel.closeModal()
+        when {
+            uiState.quickSettingsOpen -> viewModel.closeQuickSettings()
+            uiState.activeModal is ActiveModal.LogKeeper -> viewModel.openModal(ActiveModal.Settings)
+            else -> viewModel.closeModal()
         }
     }
 
@@ -70,11 +78,6 @@ fun MainMapScreen(
                 snackbarHostState.showSnackbar("Location permission denied. Map functions without location tracking.")
             }
         }
-    }
-
-    // Initialize MapLibre singleton once
-    LaunchedEffect(Unit) {
-        MapLibre.getInstance(context)
     }
 
     // Remember MapEngineController across recompositions
@@ -127,9 +130,61 @@ fun MainMapScreen(
                     }
                 }
                 lifecycleOwner.lifecycle.addObserver(observer)
+
+                val didFailListener = MapView.OnDidFailLoadingMapListener { error ->
+                    val msg = "Map load failed: $error"
+                    DiagnosticRepository.record(DiagnosticRepository.Severity.ERROR, "MapLibreEngine", msg)
+                    viewModel.onMapStageChanged("Map Load Failed", msg, false)
+                }
+                val finishStyleListener = MapView.OnDidFinishLoadingStyleListener {
+                    DiagnosticRepository.record(DiagnosticRepository.Severity.INFO, "MapLibreEngine", "Style loaded successfully")
+                    viewModel.onMapStageChanged("Style Loaded", null, true)
+                }
+                val finishRenderMapListener = MapView.OnDidFinishRenderingMapListener { fullyRendered ->
+                    if (fullyRendered) {
+                        DiagnosticRepository.record(DiagnosticRepository.Severity.INFO, "MapLibreEngine", "Map tiles and layers fully rendered")
+                        viewModel.onMapStageChanged("Fully Rendered", null, true)
+                    }
+                }
+                val idleListener = MapView.OnDidBecomeIdleListener {
+                    DiagnosticRepository.record(DiagnosticRepository.Severity.INFO, "MapLibreEngine", "Engine idle (quiescent)")
+                }
+                val glyphsErrorListener = MapView.OnGlyphsErrorListener { fontStack, rangeStart, rangeEnd ->
+                    val msg = "Glyphs missing for font: ${fontStack.joinToString()} range: $rangeStart-$rangeEnd"
+                    DiagnosticRepository.record(DiagnosticRepository.Severity.WARNING, "MapLibreEngine", msg)
+                }
+                val spriteErrorListener = MapView.OnSpriteErrorListener { spriteId, url ->
+                    val msg = "Sprite load error for id: $spriteId url: $url"
+                    DiagnosticRepository.record(DiagnosticRepository.Severity.WARNING, "MapLibreEngine", msg)
+                }
+                val renderErrorListener = MapView.OnRenderErrorListener {
+                    val msg = "Rendering frame error encountered in native GL pipeline"
+                    DiagnosticRepository.record(DiagnosticRepository.Severity.ERROR, "MapLibreEngine", msg)
+                    viewModel.onMapStageChanged("Render Error", msg, false)
+                }
+
+                mapViewRef?.let { mv ->
+                    mv.addOnDidFailLoadingMapListener(didFailListener)
+                    mv.addOnDidFinishLoadingStyleListener(finishStyleListener)
+                    mv.addOnDidFinishRenderingMapListener(finishRenderMapListener)
+                    mv.addOnDidBecomeIdleListener(idleListener)
+                    mv.addOnGlyphsErrorListener(glyphsErrorListener)
+                    mv.addOnSpriteErrorListener(spriteErrorListener)
+                    mv.addOnRenderErrorListener(renderErrorListener)
+                }
+
                 onDispose {
                     lifecycleOwner.lifecycle.removeObserver(observer)
-                    mapViewRef?.onDestroy()
+                    mapViewRef?.let { mv ->
+                        mv.removeOnDidFailLoadingMapListener(didFailListener)
+                        mv.removeOnDidFinishLoadingStyleListener(finishStyleListener)
+                        mv.removeOnDidFinishRenderingMapListener(finishRenderMapListener)
+                        mv.removeOnDidBecomeIdleListener(idleListener)
+                        mv.removeOnGlyphsErrorListener(glyphsErrorListener)
+                        mv.removeOnSpriteErrorListener(spriteErrorListener)
+                        mv.removeOnRenderErrorListener(renderErrorListener)
+                        mv.onDestroy()
+                    }
                 }
             }
 
@@ -142,7 +197,9 @@ fun MainMapScreen(
                             controller.attachMap(
                                 map = maplibreMap,
                                 currentStyleUri = uiState.currentStyle.styleUri,
-                                onStyleLoaded = { /* Style ready */ }
+                                onStyleLoaded = {
+                                    viewModel.onMapStageChanged("Style Attached", null, true)
+                                }
                             )
                         }
                         mapViewRef = this
@@ -151,18 +208,39 @@ fun MainMapScreen(
                 update = { /* MapView lifecycle managed via observer */ }
             )
 
-            // Top-left Coordinate & Info Panel
-            TopCoordinateInfoPanel(
-                cameraState = uiState.camera,
-                isCollapsed = uiState.isTopPanelCollapsed,
-                isInternetEnabled = uiState.isInternetEnabled,
-                locationStatusText = uiState.locationStatusText,
-                onToggleCollapse = { viewModel.toggleTopPanel() },
+            // Fixed White Status Bar Protection Strip
+            // Guarantees Android 15 / SDK 36 edge-to-edge transparent system bars display dark readable icons over pure white
+            Spacer(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .windowInsetsTopHeight(WindowInsets.statusBars)
+                    .background(Color.White)
+                    .align(Alignment.TopCenter)
+            )
+
+            // Top-left Coordinate & Scale Tile Cluster (Matching Reference Image)
+            Column(
                 modifier = Modifier
                     .align(Alignment.TopStart)
                     .statusBarsPadding()
-                    .padding(start = 14.dp, top = 8.dp)
-            )
+                    .padding(start = 12.dp, top = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                // Top coordinate box
+                TopCoordinateInfoPanel(
+                    cameraState = uiState.camera,
+                    isCollapsed = uiState.isTopPanelCollapsed,
+                    isInternetEnabled = uiState.isInternetEnabled,
+                    locationStatusText = uiState.locationStatusText,
+                    onToggleCollapse = { viewModel.toggleTopPanel() }
+                )
+
+                // Stepped Scale Ruler Tile (Ratio + Bracket Scale)
+                com.example.ui.components.MapSteppedScaleTile(
+                    latitude = uiState.camera.latitude,
+                    zoom = uiState.camera.zoom
+                )
+            }
 
             // Top-right Compass Indicator (Reflects live map rotation, click resets to North-Up)
             com.example.ui.components.MapCompassIndicator(
@@ -172,94 +250,83 @@ fun MainMapScreen(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
                     .statusBarsPadding()
-                    .padding(end = 14.dp, top = 8.dp)
+                    .padding(end = 12.dp, top = 8.dp)
             )
 
-            // Mid-left Compact Map Scale Bar
-            com.example.ui.components.MapScaleBar(
-                latitude = uiState.camera.latitude,
-                zoom = uiState.camera.zoom,
+            // Right-side Floating Controls (Zoom +/- & Telemetry)
+            // Positioned at bottom-right in the gap beside the bottom bar
+            RightSideMapControls(
+                isInternetEnabled = uiState.isInternetEnabled,
+                isLocationActive = uiState.isLocationActive,
+                onToggleInternet = {
+                    viewModel.toggleInternet()
+                    coroutineScope.launch {
+                        val status = if (!uiState.isInternetEnabled) "In-App Internet ON" else "In-App Internet OFF (Blocked)"
+                        snackbarHostState.showSnackbar(status)
+                    }
+                },
+                onToggleLocation = {
+                    viewModel.toggleLocationMode(
+                        onPermissionNeeded = {
+                            val finePerm = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION)
+                            if (finePerm == PackageManager.PERMISSION_GRANTED) {
+                                viewModel.setLocationPermissionGranted(true)
+                            } else {
+                                locationPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+                            }
+                        }
+                    )
+                },
+                onRefreshMaps = {
+                    controller.refreshVisibleMap()
+                    coroutineScope.launch {
+                        snackbarHostState.showSnackbar("Refreshing visible map area...")
+                    }
+                },
+                onZoomIn = { controller.zoomIn() },
+                onZoomOut = { controller.zoomOut() },
                 modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .statusBarsPadding()
-                    .padding(start = 14.dp, top = 70.dp)
+                    .align(Alignment.BottomEnd)
+                    .navigationBarsPadding()
+                    .padding(end = 8.dp, bottom = 8.dp)
             )
 
-            // Bottom-right Map Attribution Badge (Directly credits OpenFreeMap, OpenMapTiles, OpenStreetMap)
+            // Bottom-left Map Attribution Badge (docked cleanly above the left-anchored bottom bar)
             com.example.ui.components.MapAttributionBadge(
                 attributionText = uiState.currentStyle.attribution,
                 onClick = { viewModel.openModal(ActiveModal.MapsPopup) },
                 modifier = Modifier
-                    .align(Alignment.BottomEnd)
+                    .align(Alignment.BottomStart)
                     .navigationBarsPadding()
-                    .padding(end = 12.dp, bottom = 246.dp)
+                    .padding(start = 12.dp, bottom = 66.dp)
             )
 
-            // Bottom-aligned Control Layer
-            // - Bottom Navigation Pill shifted further LEFT
-            // - Independent circular Right-Side controls aligned near bottom-right
-            Row(
+            // Compact Floating Bottom Navigation Bar (Anchored to Bottom-Left per Reference Screenshot)
+            BottomNavigationBar(
+                isNorthLocked = uiState.camera.isNorthLocked,
+                onSettingsClick = { viewModel.openModal(ActiveModal.Settings) },
+                onSettingsLongClick = { viewModel.openQuickSettings() },
+                onMapsClick = { viewModel.openModal(ActiveModal.MapsPopup) },
+                onPlacesClick = { viewModel.openModal(ActiveModal.PlacesPopup) },
+                onPlacesLongClick = { viewModel.openModal(ActiveModal.MemoryPalaceWorkspace) },
+                onCompassToggleClick = { viewModel.toggleNorthLock() },
+                onToolsLongClick = {
+                    viewModel.openModal(ActiveModal.ToolsPopup)
+                },
                 modifier = Modifier
                     .align(Alignment.BottomStart)
-                    .fillMaxWidth()
                     .navigationBarsPadding()
-                    .padding(start = 12.dp, end = 12.dp, bottom = 8.dp),
-                verticalAlignment = Alignment.Bottom,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                // Floating Bottom Navigation Pill (Shifted LEFT for thumb reach and right stack room)
-                BottomNavigationBar(
-                    isNorthLocked = uiState.camera.isNorthLocked,
-                    onSettingsClick = { viewModel.openModal(ActiveModal.Settings) },
-                    onSettingsLongClick = { viewModel.openQuickSettings() },
-                    onMapsClick = { viewModel.openModal(ActiveModal.MapsPopup) },
-                    onPlacesClick = { viewModel.openModal(ActiveModal.PlacesPopup) },
-                    onPlacesLongClick = { viewModel.openModal(ActiveModal.MemoryPalaceWorkspace) },
-                    onCompassToggleClick = { viewModel.toggleNorthLock() },
-                    onToolsLongClick = { viewModel.openModal(ActiveModal.ToolsPopup) },
-                    modifier = Modifier.padding(bottom = 2.dp)
-                )
-
-                // Right-side Map Controls (5 independent circular buttons aligned bottom-right)
-                RightSideMapControls(
-                    isInternetEnabled = uiState.isInternetEnabled,
-                    isLocationActive = uiState.isLocationActive,
-                    onToggleInternet = {
-                        viewModel.toggleInternet()
-                        coroutineScope.launch {
-                            val status = if (!uiState.isInternetEnabled) "In-App Internet ON" else "In-App Internet OFF (Blocked)"
-                            snackbarHostState.showSnackbar(status)
-                        }
-                    },
-                    onToggleLocation = {
-                        viewModel.toggleLocationMode(
-                            onPermissionNeeded = {
-                                val finePerm = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION)
-                                if (finePerm == PackageManager.PERMISSION_GRANTED) {
-                                    viewModel.setLocationPermissionGranted(true)
-                                } else {
-                                    locationPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
-                                }
-                            }
-                        )
-                    },
-                    onRefreshMaps = {
-                        controller.refreshVisibleMap()
-                        coroutineScope.launch {
-                            snackbarHostState.showSnackbar("Refreshing visible map area...")
-                        }
-                    },
-                    onZoomIn = { controller.zoomIn() },
-                    onZoomOut = { controller.zoomOut() },
-                    modifier = Modifier.padding(bottom = 2.dp)
-                )
-            }
+                    .padding(start = 8.dp, bottom = 8.dp)
+            )
 
             // Floating Popups & Modals (All unified in crisp White & Sky Blue)
             AppModalManager(
                 activeModal = uiState.activeModal,
                 quickSettingsOpen = uiState.quickSettingsOpen,
                 currentStyle = uiState.currentStyle,
+                uiState = uiState,
+                isDeviceOnline = isDeviceOnline,
+                connectionType = connectionType,
                 onSelectStyle = { style ->
                     viewModel.selectStyle(style)
                     controller.setStyle(style.styleUri)
@@ -271,6 +338,12 @@ fun MainMapScreen(
                 },
                 onOpenMemoryPalace = {
                     viewModel.openModal(ActiveModal.MemoryPalaceWorkspace)
+                },
+                onOpenLogKeeper = {
+                    viewModel.openModal(ActiveModal.LogKeeper)
+                },
+                onBackToSettings = {
+                    viewModel.openModal(ActiveModal.Settings)
                 }
             )
         }

@@ -220,3 +220,109 @@
   - `compile_applet`: Succeeded.
 * **Deviations from request**: None.
 * **Known issues / follow-up**: None.
+
+### Entry: Milestone 2.2.1 — Diagnostics, Full-Screen Log Keeper and Fixed Android Status Bar
+* **Timestamp**: 2026-11-04T21:55:00Z
+* **Summary**: Implemented Milestone 2.2.1: centralized DiagnosticRepository with bounded 250-item ring buffer, GlobalErrorCatcher for uncaught exceptions, event-driven NetworkDiagnosticsMonitor, full-screen Log Keeper workspace under Settings with search/filters/export, MapView SDK lifecycle listeners connected to live UI stage state, and fixed Android 15/SDK 36 status bar edge-to-edge styling with pure white protection.
+* **Exact files touched**:
+  - `app/src/main/java/com/example/MainActivity.kt`
+  - `app/src/main/java/com/example/diagnostics/DiagnosticRepository.kt`
+  - `app/src/main/java/com/example/diagnostics/NetworkDiagnosticsMonitor.kt`
+  - `app/src/main/java/com/example/diagnostics/GlobalErrorCatcher.kt`
+  - `app/src/main/java/com/example/network/AppNetworkPolicy.kt`
+  - `app/src/main/java/com/example/ui/screens/MapViewModel.kt`
+  - `app/src/main/java/com/example/ui/screens/MainMapScreen.kt`
+  - `app/src/main/java/com/example/ui/components/AppModalManager.kt`
+  - `app/src/main/java/com/example/ui/components/LogKeeperScreenContent.kt`
+  - `app/src/test/java/com/example/ExampleUnitTest.kt`
+* **What was actually done**:
+  - Built `DiagnosticRepository` with a bounded ConcurrentLinkedDeque (250 entries), StateFlow observable updates, export report generator, and credential/precise coordinate sanitization.
+  - Implemented `GlobalErrorCatcher` to intercept uncaught thread exceptions and record stack traces in `DiagnosticRepository` before handing off to Android's default handler.
+  - Implemented `NetworkDiagnosticsMonitor` utilizing `ConnectivityManager.NetworkCallback` (zero polling) to track online status and transport type (Wi-Fi, Cellular, Ethernet).
+  - Forwarded `AppNetworkPolicy` logs into `DiagnosticRepository` while maintaining backwards-compatible StateFlow.
+  - Added full-screen `LogKeeperScreenContent` adhering to Sky Blue (`#0284C7`) and White (`#FFFFFF`) styling, featuring diagnostic summary cards, severity filters (ALL, ERROR, WARN, INFO), clipboard copy, and Document Picker report export (`CreateDocument`).
+  - Added dedicated Log Keeper navigation entry in `SettingsScreenContent()`.
+  - Configured back-navigation stack: Back from Log Keeper returns to Settings; Back from Settings returns to Map.
+  - Connected MapView SDK event listeners (`OnDidFailLoadingMapListener`, `OnDidFinishLoadingStyleListener`, `OnDidFinishRenderingMapListener`, `OnDidBecomeIdleListener`, `OnGlyphsErrorListener`, `OnSpriteErrorListener`, `OnRenderErrorListener`) to update `isMapReady`, `mapLoadingStage`, and `lastMapError`.
+  - Fixed status bar contrast under Android 15 / SDK 36: configured `enableEdgeToEdge(statusBarStyle = SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT))` in `MainActivity` and inserted a pure white protection surface (`windowInsetsTopHeight(WindowInsets.statusBars)`) at the top of the Compose hierarchy.
+  - Added comprehensive unit tests in `ExampleUnitTest.kt` verifying ring buffer capacity (250), rotation, severity filtering, credential/coordinate redaction, and report generation.
+* **How it was verified**:
+  - `gradle testDebugUnitTest`: 7 tests completed, 0 failed (BUILD SUCCESSFUL in 29s).
+  - `compile_applet`: Build succeeded - the applet is compiled.
+  - `gradle assembleDebug`: BUILD SUCCESSFUL in 4s.
+  - Target APK verified at `app/build/outputs/apk/debug/app-debug.apk` (71 MB).
+* **Deviations from request**: None.
+* **Known issues / follow-up**: None.
+
+### Entry: Milestone 2.2.2 — UI Alignment with Reference Screenshot
+* **Timestamp**: 2026-11-05T06:46:00Z
+* **Summary**: Replaced clunky UI components with the exact layout from user's reference screenshot: top DMS coordinate card + stepped ratio & bracket scale ruler tile, bare glyph right-side controls with zero background bubbles and enlarged zoom icons, dark docked bottom bar with 5 white icons, and centered floating popup dialogs.
+* **Exact files touched**:
+  - `app/src/main/java/com/example/ui/components/TopCoordinateInfoPanel.kt`
+  - `app/src/main/java/com/example/ui/components/RightSideMapControls.kt`
+  - `app/src/main/java/com/example/ui/components/BottomNavigationBar.kt`
+  - `app/src/main/java/com/example/ui/components/AppModalManager.kt`
+  - `app/src/main/java/com/example/ui/screens/MainMapScreen.kt`
+  - `app/src/main/java/com/example/map/engine/MapEngineController.kt`
+* **What was actually done**:
+  - Rebuilt `TopCoordinateInfoPanel.kt` to format coordinates in DMS (`DD°MM'SS.SS" N/S  DD°MM'SS.SS" E/W`) on a crisp, compact white card with 6dp corners.
+  - Implemented `MapSteppedScaleTile` directly below coordinates, rendering the ratio/zoom level (`1:3,239K  8/20`) with a stepped bracket scale ruler (`|________| 50 km`).
+  - Redesigned `RightSideMapControls.kt`: Completely removed white circular card containers and borders; converted to pure floating glyphs with subtle shadow for high contrast across both light vector tiles and dark satellite imagery; enlarged Zoom In (`+`) and Zoom Out (`-`) to 38dp.
+  - Redesigned `BottomNavigationBar.kt`: Replaced floating pill with a dark translucent docked bar (`#CC1E293B`) spanning above navigation insets, featuring 5 prominent white icons (Map Sources/Settings, Layers, Placemarks/Flags, Center on GPS reticle, and Compass/Bearing lock).
+  - Adjusted `AppModalManager.kt`: Re-centered `FloatingPopupDialog` in the lower-middle viewport directly above the bottom bar with true modal behavior (not a bottom sheet).
+  - Added `centerOnLocation` in `MapEngineController.kt` wired to the bottom reticle button.
+* **How it was verified**:
+  - `gradle testDebugUnitTest`: 7 tests completed, 0 failed (BUILD SUCCESSFUL in 38s).
+  - `compile_applet`: Build succeeded - the applet is compiled.
+  - `gradle assembleDebug`: BUILD SUCCESSFUL in 6s.
+  - Target APK verified at `app/build/outputs/apk/debug/app-debug.apk` (71 MB).
+* **Deviations from request**: None.
+* **Known issues / follow-up**: None.
+
+### Entry: Phase 2.3 — Compact Left-Anchored Bottom Bar & Circular Bubble Controls
+* **Timestamp**: 2026-11-06T11:10:00Z
+* **Summary**: Redesigned bottom navigation container to a compact, content-tight grey-translucent floating pill anchored to the left with an 8dp inset, redesigned right controls into individual circular grey-translucent bubbles, and relocated the zoom cluster down into the horizontal gap directly adjacent to the bottom bar.
+* **Exact files touched**:
+  - `BLUEPRINT.md`
+  - `app/src/main/java/com/example/ui/components/BottomNavigationBar.kt`
+  - `app/src/main/java/com/example/ui/components/RightSideMapControls.kt`
+  - `app/src/main/java/com/example/ui/screens/MainMapScreen.kt`
+  - `receipts/RECEIPTS_001.md`
+* **What was actually done**:
+  - Initialized `BLUEPRINT.md` capturing architectural design, component hierarchy, phase roadmap, and change ledger.
+  - Refactored `BottomNavigationBar.kt` to wrap content width (`wrapContentWidth()`), applied 16dp four-corner rounding (`RoundedCornerShape(16.dp)`), dark grey translucent surface (`Color(0xCC1E293B)`), and subtle 0.5dp outline border (`Color(0x33FFFFFF)`).
+  - Refactored `RightSideMapControls.kt` to enclose each action in an individual circular bubble (`CircleShape`, 44dp visual with 48dp touch target) with matching grey-translucent backplate and frosted border.
+  - Structured `RightSideMapControls` into an upper telemetry cluster (Internet, GPS, Refresh), an 8dp separator spacer, and a bottom Zoom cluster (Zoom In, Zoom Out).
+  - Repositioned `BottomNavigationBar` in `MainMapScreen.kt` to `Alignment.BottomStart` with `start = 8.dp, bottom = 8.dp` plus `navigationBarsPadding()`.
+  - Repositioned `RightSideMapControls` in `MainMapScreen.kt` to `Alignment.BottomEnd` with `end = 8.dp, bottom = 8.dp` plus `navigationBarsPadding()`, aligning `Zoom Out (-)` on the same horizontal baseline directly beside the bottom bar.
+  - Adjusted `MapAttributionBadge` to `bottom = 66.dp` on `Alignment.BottomStart` to maintain clear vertical separation above the compact bottom bar.
+* **How it was verified**:
+  - Local build verified with `compile_applet` (SUCCEEDED).
+  - Local JVM unit test suite verified via `gradle :app:testDebugUnitTest` (7 tests completed, 0 failed, BUILD SUCCESSFUL in 21s).
+* **Deviations from request**: None. Built exactly to the discussed and finalized layout specifications.
+* **Known issues / follow-up**: None.
+
+### Entry: Phase 2.4 — Milestone 1 4-Button Restoration, Snug Translucency & In-Canvas Popovers
+* **Timestamp**: 2026-11-06T11:26:00Z
+* **Summary**: Restored 4 original Milestone 1 bottom navigation buttons (Tune/Settings, Map, PinDrop/Places, Explore/Tools) with tap and long-press support, tightened container padding (4dp horizontal, 3dp vertical) with 45% translucency (Color(0x731E293B)), enlarged right-side circular bubbles to 48dp with 32dp zoom glyphs and solid 1dp frosted border, and refactored popup dialogs into in-canvas anchored popover cards resting directly above the bottom bar without window-dimming scrims.
+* **Exact files touched**:
+  - `BLUEPRINT.md`
+  - `app/src/main/java/com/example/ui/components/BottomNavigationBar.kt`
+  - `app/src/main/java/com/example/ui/components/RightSideMapControls.kt`
+  - `app/src/main/java/com/example/ui/components/AppModalManager.kt`
+  - `app/src/main/java/com/example/ui/screens/MainMapScreen.kt`
+  - `receipts/RECEIPTS_001.md`
+* **What was actually done**:
+  - Re-implemented the 4 Milestone 1 buttons in `BottomNavigationBar.kt` using `combinedClickable`: 1. `Tune` (Settings & Preferences), 2. `Map` (Map Styles & Layers), 3. `PinDrop` (Places & Waypoints), 4. `Explore`/`Lock` (Compass & Tools).
+  - Wired dual gestures: tap Settings opens full settings, long-press opens Quick Settings; tap Places opens Places popover, long-press opens Memory Palace; tap Compass toggles North Lock, long-press opens Tools popover.
+  - Reduced container footprint to `wrapContentWidth()` with `horizontal = 4.dp, vertical = 3.dp` padding and `2.dp` inter-button spacing. Applied 45% translucent dark slate `Color(0x731E293B)` and `0.5dp` outline border (`Color(0x44FFFFFF)`).
+  - Scaled `RightSideMapControls.kt` bubbles to `48.dp`, applied matching `Color(0x731E293B)` backplates with solid `1.dp` frosted border (`Color(0x55FFFFFF)`), and enlarged Zoom In/Out icons to `32.dp`.
+  - Replaced platform `androidx.compose.ui.window.Dialog` in `AppModalManager.kt` with an in-canvas popover card anchored directly above the bottom-left bar (`Alignment.BottomStart`, `start = 8.dp, bottom = 58.dp`). Removed full-screen dimming scrim, allowing map canvas and zoom controls to remain interactive.
+* **How it was verified**:
+  - Local build verified with `compile_applet` (SUCCEEDED).
+  - Local JVM unit test suite verified via `gradle :app:testDebugUnitTest` (7 tests completed, 0 failed, BUILD SUCCESSFUL in 9s).
+* **Deviations from request**: None. Built exactly to finalized specifications.
+* **Known issues / follow-up**: None.
+
+
+
