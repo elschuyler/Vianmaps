@@ -49,25 +49,22 @@
 - [x] Phase 2.4: Restore 4 original Milestone 1 buttons (Tune, Map, PinDrop, Explore/Tools) with tap & long-press, increase bar translucency (45%) and snugness, enlarge right-side bubbles to 48dp with sharper glyphs, and convert popups to in-canvas anchored popovers above the bar without dark scrim.
 - [x] Phase 2.5: Foldable top coordinate panel with chevron indicator, expanded decimal coordinate & camera telemetry readouts, and placeholder Sensor Panel button.
 - [x] Phase 2.6: Fix Blank MapLibre Base Map & Remove Attribution Banner (Correct MapView lifecycle ownership and host lifecycle sync, pre-register listeners before getMapAsync, add MapEngineStatus model, sync MapLibre.setConnected with network policy, add MapLibre Demo Tiles diagnostic style, and remove wide attribution banner while preserving native attribution control).
+- [x] Phase 3.0: MapView Lifecycle Decoupling, Hardware Telemetry & Tile-by-Tile Offline Foundation (Eliminated recomposition disposal by remembering single MapView instance, keyed DisposableEffect strictly to lifecycleOwner, tagged destruction reasons, added device hardware diagnostic logging in MainActivity, enlarged ambient cache to 500 MB via OfflineManager, migrated legacy maplibre_demo preference to OpenFreeMap Liberty default, implemented TileStorageManager for progressive XYZ tile persistence, OsmOfflineDataRepository for canonical OSM feature deduplication across tile buffers, RoutingGraphCoverageIndex for Valhalla 3-level graph hierarchy mapping, and defined HYBRID_SATELLITE_OSM style foundation).
 
 ## 5. Ledger of Changes
 - 2026-11-06: Initialized BLUEPRINT.md.
 - 2026-11-06: Completed Phase 2.3 UI redesign execution.
 - 2026-11-06: Completed Phase 2.4 (4-button restoration, 45% translucency, 48dp bubbles, in-canvas popovers).
-- 2026-11-06: Completed Phase 2.5:
-  - Updated `TopCoordinateInfoPanel.kt` to be foldable on tap, featuring a chevron expand/collapse icon (`ExpandMore`/`ExpandLess`).
-  - Implemented high-precision decimal degrees formatter `formatDecimal` alongside DMS GPS notation.
-  - Added camera telemetry row (live Zoom level, Bearing angle, In-App Internet policy status).
-  - Integrated "Sensor Panel" action button in unfolded state wired to `onOpenSensorPanel()` callback.
-  - Wired in `MainMapScreen.kt` to open `ActiveModal.PlaceholderTool("Sensor Panel", ...)` anchored popover.
-  - Verified with `compile_applet` and local unit test suite (`testDebugUnitTest`).
-- 2026-11-06: Completed Phase 2.6 (Blank Base Map Fix & Attribution Banner Removal):
-  - Created `MapEngineStatus` enum model (8 unambiguous states: INITIALIZING, WAITING_FOR_MAP_VIEW, LOADING_STYLE, STYLE_READY, RENDERING, FULLY_RENDERED, FAILED, RETRYING).
-  - Resolved root cause of blank pale beige base map: MapView hosted in `AndroidView` was missing initial `onStart()` / `onResume()` calls because `LifecycleEventObserver` only catches future transitions after Activity is already resumed. Fixed by actively synchronizing with `lifecycleOwner.lifecycle.currentState` upon creation.
-  - Established single lifecycle ownership with guarded `safeDestroy()` and memory callback forwarding (`onLowMemory`).
-  - Pre-registered all diagnostic listeners (`OnWillStartLoadingMapListener`, `OnDidFinishLoadingStyleListener`, `OnDidFinishRenderingFrameListener`, `OnDidFinishRenderingMapListener`, `OnDidFailLoadingMapListener`, `OnRenderErrorListener`, `OnShaderCompileFailedListener`, `OnGlyphsErrorListener`, `OnSpriteErrorListener`, `OnDidBecomeIdleListener`) before `onCreate()` and `getMapAsync()`, logging all 13 required stages into `DiagnosticRepository`.
-  - Added `MAPLIBRE_DEMO_TILES` as temporary lightweight diagnostic test style.
-  - Synchronized `MapLibre.setConnected` with in-app network policy state.
-  - Connected right-side refresh control to `retryOrRefreshMap(controller)` with in-place reloading.
-  - Removed wide horizontal `MapAttributionBadge` banner from main screen while preserving MapLibre native attribution button and logo.
-  - Verified local compilation (`compile_applet`), unit tests (`testDebugUnitTest` 8/8 passed), and debug APK build (`assembleDebug`).
+- 2026-11-06: Completed Phase 2.5: Foldable top coordinate panel with chevron indicator, expanded decimal coordinate & camera telemetry readouts, and placeholder Sensor Panel button.
+- 2026-11-06: Completed Phase 2.6: Blank Base Map Fix & Attribution Banner Removal.
+- 2026-11-07: Completed Phase 3.0 (MapView Lifecycle Decoupling, Hardware Telemetry & Progressive Tile Retention Foundation):
+  - Solved premature MapView disposal: Decoupled `DisposableEffect` key from mutable state by keying strictly on `lifecycleOwner` and instantiating `MapView` inside a stable `remember` block. Recompositions triggered by DataStore preference updates or popup UI toggles no longer tear down the native MapView.
+  - Implemented explicit caller-reason tagging in `safeDestroy()` (`ACTIVITY_ON_DESTROY`, `COMPOSE_DISPOSAL`, `ANDROID_VIEW_RELEASE`).
+  - Added Activity lifecycle diagnostic logging (`ACTIVITY_ON_CREATE`, `ACTIVITY_ON_START`, `ACTIVITY_ON_RESUME`, `ACTIVITY_ON_PAUSE`, `ACTIVITY_ON_STOP`, `ACTIVITY_ON_DESTROY`) and device hardware telemetry logging (Device Manufacturer, Model, Android OS SDK, OpenGL ES version, Vulkan hardware version).
+  - Enlarged MapLibre SDK ambient cache to 500 MB at startup via `OfflineManager.setMaximumAmbientCacheSize()`.
+  - Corrected first-install preference mismatch: Aligned `AppPreferencesRepository` default to `openfreemap_liberty` and migrated legacy test-only `maplibre_demo` defaults.
+  - Built `TileStorageManager` for automatic progressive tile-by-tile offline retention under persistent internal app storage (`files/retained_tiles/`) with in-flight lock deduplication and independent category availability.
+  - Built `OsmOfflineDataRepository` for canonical OSM POI, building, region, and road feature deduplication by stable OSM ID across adjacent MVT tile boundary buffers.
+  - Built `RoutingGraphCoverageIndex` modeling Valhalla 3-level graph hierarchy (Level 0: 4°, Level 1: 1°, Level 2: 0.25°) and independent offline routing coverage mapping.
+  - Defined `HYBRID_SATELLITE_OSM` composite architecture foundation in `MapSourceRepository.kt`.
+  - Verified local JVM unit test suite (11/11 tests passing), container compilation (`compile_applet`), and debug APK build (`assembleDebug`).

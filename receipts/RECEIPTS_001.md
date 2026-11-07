@@ -387,3 +387,39 @@
   - Clean debug APK verified via `gradle assembleDebug` (BUILD SUCCESSFUL in 3s, output at `app/build/outputs/apk/debug/app-debug.apk`).
 * **Deviations from request**: None. Preserved existing layout, controls, and MapLibre native engine.
 * **Known issues / follow-up**: None.
+
+---
+
+### Phase 3.0 & Credential Immunity Remediation
+* **Timestamp**: 2026-11-07T09:55:00-08:00
+* **Summary**: Eliminated MapView recomposition disposal, resolved credential exposure, added hardware telemetry and built tile-by-tile offline persistence architecture.
+* **Exact files touched**:
+  - `app/src/main/java/com/example/MainActivity.kt`
+  - `app/src/main/java/com/example/ui/screens/MainMapScreen.kt`
+  - `app/src/main/java/com/example/data/preferences/AppPreferencesRepository.kt`
+  - `app/src/main/java/com/example/map/source/MapSourceRepository.kt`
+  - `app/src/main/java/com/example/data/tile/TileStorageManager.kt`
+  - `app/src/main/java/com/example/data/osm/OsmOfflineDataRepository.kt`
+  - `app/src/main/java/com/example/data/routing/RoutingGraphCoverageIndex.kt`
+  - `app/src/test/java/com/example/ExampleUnitTest.kt`
+  - `app/build.gradle.kts`
+  - `.gitignore`
+  - `debug.keystore.base64` (deleted)
+  - `BLUEPRINT.md`
+  - `receipts/RECEIPTS_001.md`
+* **What was actually done**:
+  - Remediated credential exposures per Non-Negotiable Credential Immunity Rule: Deleted `/debug.keystore.base64` from repository, updated `.gitignore` to cover `debug.keystore.base64`, `*.keystore`, `*.jks`, and `*.p12`, and removed hardcoded passwords from `app/build.gradle.kts` `signingConfigs` by injecting credentials dynamically via environment variables (`DEBUG_STORE_PASSWORD`, `STORE_PASSWORD`, etc.) with fallback to AGP standard debug signing.
+  - Decoupled `MapView` lifecycle in `MainMapScreen.kt`: Encapsulated `MapView` in a stable `remember` block and keyed `DisposableEffect(lifecycleOwner)` strictly to the lifecycle owner rather than mutable UI state, preventing accidental disposal during recomposition.
+  - Tagged `safeDestroy()` with explicit caller reasons (`ACTIVITY_ON_DESTROY`, `COMPOSE_DISPOSAL`, `ANDROID_VIEW_RELEASE`).
+  - Added device hardware diagnostics (Manufacturer, Model, Android OS SDK, OpenGL ES version, Vulkan hardware version) and Activity lifecycle event logging in `MainActivity.kt`.
+  - Configured 500 MB ambient cache at startup via `OfflineManager.setMaximumAmbientCacheSize()`.
+  - Aligned default map style to OpenFreeMap Liberty and added automated migration from legacy test style in `AppPreferencesRepository.kt`.
+  - Created `TileStorageManager` for Slippy map XYZ coordinate conversions, in-flight download locks, independent category availability, and persistent tile retention under internal storage.
+  - Created `OsmOfflineDataRepository` for canonical OSM POI, building, region, and road feature deduplication across tile boundary buffers.
+  - Created `RoutingGraphCoverageIndex` modeling Valhalla 3-level graph hierarchy (Level 0: 4°, Level 1: 1°, Level 2: 0.25°) and routing coverage mapping.
+* **How it was verified**:
+  - Local container build verified with `compile_applet` (BUILD SUCCEEDED).
+  - Local JVM test suite executed via `gradle :app:testDebugUnitTest`: 11/11 tests passed (BUILD SUCCESSFUL).
+  - Clean debug APK build verified via `gradle assembleDebug` (BUILD SUCCESSFUL in 2s, output at `app/build/outputs/apk/debug/app-debug.apk`).
+* **Deviations from request**: None. Preserved native MapLibre engine, existing Compose architecture, and UI layout.
+* **Known issues / follow-up**: Physical on-device run needed to inspect Log Keeper hardware and lifecycle logs.

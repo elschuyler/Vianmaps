@@ -55,6 +55,81 @@ class ExampleUnitTest {
     assertEquals("MapLibre", demoStyle.providerName)
     assertTrue(demoStyle.isTemporaryDevelopmentStyle)
     assertTrue(demoStyle.styleUri.contains("demotiles.maplibre.org"))
+
+    val hybridStyle = MapSourceRepository.getStyleById("hybrid_satellite_osm")
+    assertEquals("hybrid_satellite_osm", hybridStyle.id)
+    assertTrue(hybridStyle.displayName.contains("Hybrid"))
+    assertTrue(hybridStyle.attribution.contains("OpenStreetMap"))
+  }
+
+  @Test
+  fun verifyTileCoordinateConversion() {
+    // San Francisco (37.7749, -122.4194) at zoom 12
+    val sfCoord = com.example.data.tile.TileCoord.fromLatLng(37.7749, -122.4194, 12)
+    assertEquals(12, sfCoord.z)
+    assertEquals(655, sfCoord.x)
+    assertEquals(1583, sfCoord.y)
+    assertEquals("12/655/1583", sfCoord.toString())
+  }
+
+  @Test
+  fun verifyOsmFeatureDeduplication() {
+    val repo = com.example.data.osm.OsmOfflineDataRepository()
+    val tileA = com.example.data.tile.TileCoord(14, 2620, 6331)
+    val tileB = com.example.data.tile.TileCoord(14, 2621, 6331)
+
+    // Feature appears in both adjacent tiles due to MVT tile boundary buffer
+    val featureTileA = com.example.data.osm.OsmPoiEntity(
+        osmId = 1001L,
+        name = "Central Station",
+        category = "railway_station",
+        latitude = 39.5,
+        longitude = 31.8,
+        sourceTile = tileA
+    )
+    val featureTileB = com.example.data.osm.OsmPoiEntity(
+        osmId = 1001L,
+        name = "Central Station",
+        category = "railway_station",
+        latitude = 39.5,
+        longitude = 31.8,
+        sourceTile = tileB
+    )
+
+    val addedA = repo.savePoiFeatures(listOf(featureTileA))
+    assertEquals(1, addedA)
+    assertEquals(1, repo.getPoiCount())
+
+    // Second ingestion with same OSM ID should be skipped (deduplicated)
+    val addedB = repo.savePoiFeatures(listOf(featureTileB))
+    assertEquals(0, addedB)
+    assertEquals(1, repo.getPoiCount())
+
+    val searchResults = repo.searchPois("Station")
+    assertEquals(1, searchResults.size)
+    assertEquals("Central Station", searchResults.first().name)
+  }
+
+  @Test
+  fun verifyRoutingGraphHierarchyAndCoverage() {
+    val index = com.example.data.routing.RoutingGraphCoverageIndex()
+    val tiles = com.example.data.routing.RoutingGraphCoverageIndex.getRequiredGraphTiles(39.5, 31.8)
+    assertEquals(3, tiles.size)
+
+    val l0 = tiles[0]
+    val l1 = tiles[1]
+    val l2 = tiles[2]
+    assertEquals(0, l0.level)
+    assertEquals(1, l1.level)
+    assertEquals(2, l2.level)
+
+    assertFalse(index.isCompleteGraphAvailable(39.5, 31.8))
+    index.markTileAvailable(l0, 1024L)
+    index.markTileAvailable(l1, 2048L)
+    assertFalse(index.isCompleteGraphAvailable(39.5, 31.8))
+    index.markTileAvailable(l2, 4096L)
+    assertTrue(index.isCompleteGraphAvailable(39.5, 31.8))
+    assertEquals(3, index.getRetainedGraphTileCount())
   }
 
   @Test

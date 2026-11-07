@@ -121,264 +121,295 @@ fun MainMapScreen(
         Box(
             modifier = Modifier.fillMaxSize()
         ) {
-            // The Native MapLibre MapView hosted inside AndroidView (full-bleed under all controls)
-            var mapViewRef by remember { mutableStateOf<MapView?>(null) }
+            // Create and retain exactly one MapView instance across all recompositions
             val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
 
-            // Single Lifecycle Owner for MapView:
-            // Ensures single destruction owner, prevents double onDestroy, and handles onLowMemory
-            androidx.compose.runtime.DisposableEffect(lifecycleOwner, mapViewRef) {
-                val currentMapView = mapViewRef ?: return@DisposableEffect onDispose {}
+            val mapView = remember {
+                val mv = MapView(context)
+                val mvId = System.identityHashCode(mv)
+                DiagnosticRepository.log(
+                    severity = LogSeverity.INFO,
+                    source = "MainMapScreen",
+                    description = "MapView instantiated (id=#$mvId)",
+                    stage = "MAPVIEW_CREATED"
+                )
 
-                var isDestroyed = false
-                fun safeDestroy() {
-                    if (!isDestroyed) {
-                        isDestroyed = true
+                // Attach listeners BEFORE onCreate and getMapAsync
+                var hasLoggedFirstFrame = false
+
+                mv.addOnWillStartLoadingMapListener {
+                    DiagnosticRepository.log(
+                        severity = LogSeverity.INFO,
+                        source = "MapLibreEngine",
+                        description = "Will start loading map (MapView#$mvId)",
+                        stage = "WILL_START_LOADING_MAP"
+                    )
+                }
+
+                // Stage 10: Style loaded successfully (listener callback)
+                mv.addOnDidFinishLoadingStyleListener {
+                    DiagnosticRepository.log(
+                        severity = LogSeverity.INFO,
+                        source = "MapLibreEngine",
+                        description = "Style loaded successfully (MapView#$mvId)",
+                        stage = "STYLE_LOADED"
+                    )
+                    viewModel.onMapStatusChanged(MapEngineStatus.STYLE_READY, "Style Loaded", null)
+                }
+
+                // Stage 11: First rendered frame received
+                mv.addOnDidFinishRenderingFrameListener { _, _, _ ->
+                    if (!hasLoggedFirstFrame) {
+                        hasLoggedFirstFrame = true
+                        DiagnosticRepository.log(
+                            severity = LogSeverity.INFO,
+                            source = "MapLibreEngine",
+                            description = "First rendered frame received (MapView#$mvId)",
+                            stage = "FIRST_FRAME_RENDERED"
+                        )
+                        viewModel.onMapStatusChanged(MapEngineStatus.RENDERING, "First frame rendered", null)
+                    }
+                }
+
+                // Stage 12: Map fully rendered
+                mv.addOnDidFinishRenderingMapListener { fullyRendered ->
+                    if (fullyRendered) {
+                        DiagnosticRepository.log(
+                            severity = LogSeverity.INFO,
+                            source = "MapLibreEngine",
+                            description = "Map tiles and layers fully rendered (MapView#$mvId)",
+                            stage = "FULLY_RENDERED"
+                        )
+                        viewModel.onMapStatusChanged(MapEngineStatus.FULLY_RENDERED, "Fully Rendered", null)
+                    }
+                }
+
+                // Stage 13: Failure listeners
+                mv.addOnDidFailLoadingMapListener { error ->
+                    val msg = "Map load failed: $error (MapView#$mvId)"
+                    DiagnosticRepository.log(
+                        severity = LogSeverity.ERROR,
+                        source = "MapLibreEngine",
+                        description = msg,
+                        stage = "LOAD_FAILED"
+                    )
+                    viewModel.onMapStatusChanged(MapEngineStatus.FAILED, "Map Load Failed", msg)
+                }
+
+                mv.addOnRenderErrorListener {
+                    val msg = "Rendering frame error in native GL pipeline (MapView#$mvId)"
+                    DiagnosticRepository.log(
+                        severity = LogSeverity.ERROR,
+                        source = "MapLibreEngine",
+                        description = msg,
+                        stage = "RENDER_ERROR"
+                    )
+                    viewModel.onMapStatusChanged(MapEngineStatus.FAILED, "Render Error", msg)
+                }
+
+                mv.addOnShaderCompileFailedListener { program, type, error ->
+                    val msg = "Shader compile failed (prog: $program, type: $type): $error (MapView#$mvId)"
+                    DiagnosticRepository.log(
+                        severity = LogSeverity.ERROR,
+                        source = "MapLibreEngine",
+                        description = msg,
+                        stage = "SHADER_ERROR"
+                    )
+                    viewModel.onMapStatusChanged(MapEngineStatus.FAILED, "Shader Compile Failed", msg)
+                }
+
+                mv.addOnGlyphsErrorListener { fontStack, rangeStart, rangeEnd ->
+                    val msg = "Glyphs missing for font: ${fontStack.joinToString()} range: $rangeStart-$rangeEnd"
+                    DiagnosticRepository.log(
+                        severity = LogSeverity.WARNING,
+                        source = "MapLibreEngine",
+                        description = msg,
+                        stage = "GLYPHS_ERROR"
+                    )
+                }
+
+                mv.addOnSpriteErrorListener { spriteId, url ->
+                    val msg = "Sprite load error for id: $spriteId url: $url"
+                    DiagnosticRepository.log(
+                        severity = LogSeverity.WARNING,
+                        source = "MapLibreEngine",
+                        description = msg,
+                        stage = "SPRITE_ERROR"
+                    )
+                }
+
+                mv.addOnDidBecomeIdleListener {
+                    DiagnosticRepository.log(
+                        severity = LogSeverity.DEBUG,
+                        source = "MapLibreEngine",
+                        description = "Engine idle (quiescent)",
+                        stage = "IDLE"
+                    )
+                }
+
+                // Stage 4: MapView "onCreate()" completed
+                mv.onCreate(null)
+                DiagnosticRepository.log(
+                    severity = LogSeverity.INFO,
+                    source = "MainMapScreen",
+                    description = "MapView 'onCreate()' completed (MapView#$mvId)",
+                    stage = "MAPVIEW_ONCREATE"
+                )
+
+                // Stage 6: "getMapAsync()" requested
+                DiagnosticRepository.log(
+                    severity = LogSeverity.INFO,
+                    source = "MainMapScreen",
+                    description = "'getMapAsync()' requested (MapView#$mvId)",
+                    stage = "GET_MAP_ASYNC_REQUESTED"
+                )
+                mv.getMapAsync { maplibreMap ->
+                    // Stage 7: Map-ready callback received
+                    DiagnosticRepository.log(
+                        severity = LogSeverity.INFO,
+                        source = "MainMapScreen",
+                        description = "Map-ready callback received (MapView#$mvId)",
+                        stage = "MAP_READY"
+                    )
+                    controller.attachMap(
+                        map = maplibreMap,
+                        styleDef = viewModel.uiState.value.currentStyle,
+                        onStatusChanged = { status, desc, err ->
+                            viewModel.onMapStatusChanged(status, desc, err)
+                        }
+                    )
+                }
+
+                mv
+            }
+
+            // Single Lifecycle Owner for MapView:
+            // Keyed ONLY on lifecycleOwner (NOT mapView or mutableState), preventing premature disposal on recomposition.
+            androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
+                val mvId = System.identityHashCode(mapView)
+                DiagnosticRepository.log(
+                    severity = LogSeverity.INFO,
+                    source = "MainMapScreen",
+                    description = "DisposableEffect entered for LifecycleOwner#${System.identityHashCode(lifecycleOwner)} with MapView#$mvId",
+                    stage = "DISPOSABLE_EFFECT_ENTRY"
+                )
+
+                var destructionReason: String? = null
+                fun safeDestroy(reason: String) {
+                    if (destructionReason == null) {
+                        destructionReason = reason
+                        DiagnosticRepository.log(
+                            severity = LogSeverity.INFO,
+                            source = "MainMapScreen",
+                            description = "MapView destruction initiated by: $reason (MapView#$mvId)",
+                            stage = "DESTROYED"
+                        )
                         try {
-                            currentMapView.onDestroy()
-                            DiagnosticRepository.log(
-                                severity = LogSeverity.INFO,
-                                source = "MainMapScreen",
-                                description = "MapView 'onDestroy()' completed exactly once",
-                                stage = "DESTROYED"
-                            )
+                            mapView.onDestroy()
                         } catch (e: Throwable) {
                             DiagnosticRepository.log(
                                 severity = LogSeverity.WARNING,
                                 source = "MainMapScreen",
-                                description = "Exception during MapView onDestroy: ${e.message}",
+                                description = "Exception during MapView.onDestroy: ${e.message}",
                                 throwable = e
                             )
                         }
+                    } else {
+                        DiagnosticRepository.log(
+                            severity = LogSeverity.DEBUG,
+                            source = "MainMapScreen",
+                            description = "Ignored redundant destruction request from $reason (already destroyed by $destructionReason)"
+                        )
                     }
                 }
 
                 val observer = LifecycleEventObserver { _, event ->
+                    DiagnosticRepository.log(
+                        severity = LogSeverity.INFO,
+                        source = "MainMapScreen",
+                        description = "Lifecycle observer event -> $event for MapView#$mvId",
+                        stage = "LIFECYCLE_EVENT"
+                    )
                     when (event) {
                         Lifecycle.Event.ON_START -> {
-                            currentMapView.onStart()
-                            DiagnosticRepository.log(
-                                severity = LogSeverity.INFO,
-                                source = "MainMapScreen",
-                                description = "MapView 'onStart()' dispatched from lifecycle observer",
-                                stage = "LIFECYCLE_STARTED"
-                            )
+                            mapView.onStart()
+                            DiagnosticRepository.log(LogSeverity.INFO, "MainMapScreen", "MapView.onStart() dispatched (MapView#$mvId)", stage = "LIFECYCLE_STARTED")
                         }
-                        Lifecycle.Event.ON_RESUME -> currentMapView.onResume()
-                        Lifecycle.Event.ON_PAUSE -> currentMapView.onPause()
-                        Lifecycle.Event.ON_STOP -> currentMapView.onStop()
-                        Lifecycle.Event.ON_DESTROY -> safeDestroy()
+                        Lifecycle.Event.ON_RESUME -> {
+                            mapView.onResume()
+                            DiagnosticRepository.log(LogSeverity.INFO, "MainMapScreen", "MapView.onResume() dispatched (MapView#$mvId)", stage = "LIFECYCLE_RESUMED")
+                        }
+                        Lifecycle.Event.ON_PAUSE -> {
+                            mapView.onPause()
+                            DiagnosticRepository.log(LogSeverity.INFO, "MainMapScreen", "MapView.onPause() dispatched (MapView#$mvId)", stage = "LIFECYCLE_PAUSED")
+                        }
+                        Lifecycle.Event.ON_STOP -> {
+                            mapView.onStop()
+                            DiagnosticRepository.log(LogSeverity.INFO, "MainMapScreen", "MapView.onStop() dispatched (MapView#$mvId)", stage = "LIFECYCLE_STOPPED")
+                        }
+                        Lifecycle.Event.ON_DESTROY -> {
+                            safeDestroy("ACTIVITY_ON_DESTROY")
+                        }
                         else -> Unit
                     }
                 }
                 lifecycleOwner.lifecycle.addObserver(observer)
+                DiagnosticRepository.log(
+                    severity = LogSeverity.INFO,
+                    source = "MainMapScreen",
+                    description = "Lifecycle observer attached to LifecycleOwner#${System.identityHashCode(lifecycleOwner)}",
+                    stage = "OBSERVER_REGISTERED"
+                )
 
                 val memoryCallbacks = object : android.content.ComponentCallbacks2 {
                     override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {}
                     override fun onLowMemory() {
-                        currentMapView.onLowMemory()
-                        DiagnosticRepository.log(
-                            severity = LogSeverity.WARNING,
-                            source = "MainMapScreen",
-                            description = "Forwarded onLowMemory() to MapView",
-                            stage = "LOW_MEMORY"
-                        )
+                        mapView.onLowMemory()
+                        DiagnosticRepository.log(LogSeverity.WARNING, "MainMapScreen", "Forwarded onLowMemory() to MapView#$mvId", stage = "LOW_MEMORY")
                     }
                     override fun onTrimMemory(level: Int) {
                         if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
-                            currentMapView.onLowMemory()
+                            mapView.onLowMemory()
                         }
                     }
                 }
                 context.registerComponentCallbacks(memoryCallbacks)
 
                 onDispose {
+                    DiagnosticRepository.log(
+                        severity = LogSeverity.INFO,
+                        source = "MainMapScreen",
+                        description = "DisposableEffect.onDispose invoked for LifecycleOwner#${System.identityHashCode(lifecycleOwner)} (MapView#$mvId)",
+                        stage = "COMPOSE_DISPOSAL"
+                    )
                     lifecycleOwner.lifecycle.removeObserver(observer)
                     try {
                         context.unregisterComponentCallbacks(memoryCallbacks)
                     } catch (_: Throwable) {}
-                    safeDestroy()
-                    mapViewRef = null
+                    safeDestroy("COMPOSE_DISPOSAL")
                 }
             }
 
             AndroidView(
                 modifier = Modifier.fillMaxSize(),
                 factory = { ctx ->
-                    // Stage 3: MapView created
                     DiagnosticRepository.log(
                         severity = LogSeverity.INFO,
                         source = "MainMapScreen",
-                        description = "MapView created",
-                        stage = "MAPVIEW_CREATED"
+                        description = "AndroidView factory invoked (returning MapView#${System.identityHashCode(mapView)})",
+                        stage = "ANDROID_VIEW_FACTORY"
                     )
-                    val mv = MapView(ctx)
-
-                    // Register supported listeners BEFORE getMapAsync and onCreate
-                    var hasLoggedFirstFrame = false
-
-                    mv.addOnWillStartLoadingMapListener {
-                        DiagnosticRepository.log(
-                            severity = LogSeverity.INFO,
-                            source = "MapLibreEngine",
-                            description = "Will start loading map",
-                            stage = "WILL_START_LOADING_MAP"
-                        )
-                    }
-
-                    // Stage 10: Style loaded successfully (listener callback)
-                    mv.addOnDidFinishLoadingStyleListener {
-                        DiagnosticRepository.log(
-                            severity = LogSeverity.INFO,
-                            source = "MapLibreEngine",
-                            description = "Style loaded successfully (MapView listener callback)",
-                            stage = "STYLE_LOADED"
-                        )
-                        viewModel.onMapStatusChanged(MapEngineStatus.STYLE_READY, "Style Loaded", null)
-                    }
-
-                    // Stage 11: First rendered frame received
-                    mv.addOnDidFinishRenderingFrameListener { _, _, _ ->
-                        if (!hasLoggedFirstFrame) {
-                            hasLoggedFirstFrame = true
-                            DiagnosticRepository.log(
-                                severity = LogSeverity.INFO,
-                                source = "MapLibreEngine",
-                                description = "First rendered frame received",
-                                stage = "FIRST_FRAME_RENDERED"
-                            )
-                            viewModel.onMapStatusChanged(MapEngineStatus.RENDERING, "First frame rendered", null)
-                        }
-                    }
-
-                    // Stage 12: Map fully rendered
-                    mv.addOnDidFinishRenderingMapListener { fullyRendered ->
-                        if (fullyRendered) {
-                            DiagnosticRepository.log(
-                                severity = LogSeverity.INFO,
-                                source = "MapLibreEngine",
-                                description = "Map tiles and layers fully rendered",
-                                stage = "FULLY_RENDERED"
-                            )
-                            viewModel.onMapStatusChanged(MapEngineStatus.FULLY_RENDERED, "Fully Rendered", null)
-                        }
-                    }
-
-                    // Stage 13: Failure listeners
-                    mv.addOnDidFailLoadingMapListener { error ->
-                        val msg = "Map load failed: $error"
-                        DiagnosticRepository.log(
-                            severity = LogSeverity.ERROR,
-                            source = "MapLibreEngine",
-                            description = msg,
-                            stage = "LOAD_FAILED"
-                        )
-                        viewModel.onMapStatusChanged(MapEngineStatus.FAILED, "Map Load Failed", msg)
-                    }
-
-                    mv.addOnRenderErrorListener {
-                        val msg = "Rendering frame error in native GL pipeline"
-                        DiagnosticRepository.log(
-                            severity = LogSeverity.ERROR,
-                            source = "MapLibreEngine",
-                            description = msg,
-                            stage = "RENDER_ERROR"
-                        )
-                        viewModel.onMapStatusChanged(MapEngineStatus.FAILED, "Render Error", msg)
-                    }
-
-                    mv.addOnShaderCompileFailedListener { program, type, error ->
-                        val msg = "Shader compile failed (program: $program, type: $type): $error"
-                        DiagnosticRepository.log(
-                            severity = LogSeverity.ERROR,
-                            source = "MapLibreEngine",
-                            description = msg,
-                            stage = "SHADER_ERROR"
-                        )
-                        viewModel.onMapStatusChanged(MapEngineStatus.FAILED, "Shader Compile Failed", msg)
-                    }
-
-                    mv.addOnGlyphsErrorListener { fontStack, rangeStart, rangeEnd ->
-                        val msg = "Glyphs missing for font: ${fontStack.joinToString()} range: $rangeStart-$rangeEnd"
-                        DiagnosticRepository.log(
-                            severity = LogSeverity.WARNING,
-                            source = "MapLibreEngine",
-                            description = msg,
-                            stage = "GLYPHS_ERROR"
-                        )
-                    }
-
-                    mv.addOnSpriteErrorListener { spriteId, url ->
-                        val msg = "Sprite load error for id: $spriteId url: $url"
-                        DiagnosticRepository.log(
-                            severity = LogSeverity.WARNING,
-                            source = "MapLibreEngine",
-                            description = msg,
-                            stage = "SPRITE_ERROR"
-                        )
-                    }
-
-                    mv.addOnDidBecomeIdleListener {
-                        DiagnosticRepository.log(
-                            severity = LogSeverity.DEBUG,
-                            source = "MapLibreEngine",
-                            description = "Engine idle (quiescent)",
-                            stage = "IDLE"
-                        )
-                    }
-
-                    // Stage 4: MapView "onCreate()" completed
-                    mv.onCreate(null)
-                    DiagnosticRepository.log(
-                        severity = LogSeverity.INFO,
-                        source = "MainMapScreen",
-                        description = "MapView 'onCreate()' completed",
-                        stage = "MAPVIEW_ONCREATE"
-                    )
-
-                    // Stage 5: Map lifecycle started - forward immediately if host Activity is already started/resumed!
-                    val hostLifecycle = lifecycleOwner.lifecycle.currentState
-                    if (hostLifecycle.isAtLeast(Lifecycle.State.STARTED)) {
-                        mv.onStart()
-                        DiagnosticRepository.log(
-                            severity = LogSeverity.INFO,
-                            source = "MainMapScreen",
-                            description = "Map lifecycle started (synchronized to host $hostLifecycle state)",
-                            stage = "LIFECYCLE_STARTED"
-                        )
-                    }
-                    if (hostLifecycle.isAtLeast(Lifecycle.State.RESUMED)) {
-                        mv.onResume()
-                    }
-
-                    // Stage 6: "getMapAsync()" requested
-                    DiagnosticRepository.log(
-                        severity = LogSeverity.INFO,
-                        source = "MainMapScreen",
-                        description = "'getMapAsync()' requested",
-                        stage = "GET_MAP_ASYNC_REQUESTED"
-                    )
-                    mv.getMapAsync { maplibreMap ->
-                        // Stage 7: Map-ready callback received
-                        DiagnosticRepository.log(
-                            severity = LogSeverity.INFO,
-                            source = "MainMapScreen",
-                            description = "Map-ready callback received",
-                            stage = "MAP_READY"
-                        )
-                        controller.attachMap(
-                            map = maplibreMap,
-                            styleDef = uiState.currentStyle,
-                            onStatusChanged = { status, desc, err ->
-                                viewModel.onMapStatusChanged(status, desc, err)
-                            }
-                        )
-                    }
-
-                    mapViewRef = mv
-                    mv
+                    mapView
                 },
-                update = { /* MapView lifecycle and style changes managed via observer and controller */ }
+                onRelease = { releasedView ->
+                    DiagnosticRepository.log(
+                        severity = LogSeverity.INFO,
+                        source = "MainMapScreen",
+                        description = "AndroidView onRelease invoked for MapView#${System.identityHashCode(releasedView)}",
+                        stage = "ANDROID_VIEW_RELEASE"
+                    )
+                },
+                update = { /* MapView updates managed via state and controller */ }
             )
 
             // Fixed White Status Bar Protection Strip

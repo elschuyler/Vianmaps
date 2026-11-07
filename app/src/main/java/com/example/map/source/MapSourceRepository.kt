@@ -75,7 +75,20 @@ object MapSourceRepository {
         licenseNotes = "Standard OSM raster tile fallback. Subject to OSM tile usage policies."
     )
 
+    // Hybrid Satellite + OSM Vector Overlay (Intended Product Architecture Foundation)
+    // Composes satellite raster imagery beneath OSM vector highways, streets, boundaries, and labels.
+    val HYBRID_SATELLITE_OSM = MapStyleDefinition(
+        id = "hybrid_satellite_osm",
+        displayName = "Hybrid (Satellite + OSM)",
+        styleUri = "https://tiles.openfreemap.org/styles/liberty",
+        attribution = "© OpenAerialMap / Esri / OpenFreeMap © OpenStreetMap contributors",
+        providerName = "Hybrid",
+        isTemporaryDevelopmentStyle = false,
+        licenseNotes = "Hybrid composite: Satellite imagery beneath OSM vector features. Provider license governed by OpenAerialMap (CC-BY 4.0) / Esri Export authorization."
+    )
+
     val availableStyles = listOf(
+        HYBRID_SATELLITE_OSM,
         OPEN_FREE_MAP_LIBERTY,
         OPEN_FREE_MAP_BRIGHT,
         OPEN_FREE_MAP_POSITRON,
