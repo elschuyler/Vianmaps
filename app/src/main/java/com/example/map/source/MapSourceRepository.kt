@@ -3,8 +3,8 @@ package com.example.map.source
 /**
  * Encapsulates map style and source information, licensing status, and attribution.
  *
- * NOTE: Provider URLs and attribution are cleanly decoupled here to support future
- * migration to self-hosted Protomaps / PMTiles archives without altering UI code.
+ * Supports both pure vector styles and genuine composite Hybrid styles
+ * (satellite raster imagery rendered beneath OSM vector roads, boundaries, and labels).
  */
 data class MapStyleDefinition(
     val id: String,
@@ -13,14 +13,51 @@ data class MapStyleDefinition(
     val attribution: String,
     val providerName: String,
     val isTemporaryDevelopmentStyle: Boolean = false,
-    val licenseNotes: String
+    val licenseNotes: String,
+    val isCompositeHybrid: Boolean = false,
+    val rasterSourceUri: String? = null,
+    val rasterMinZoom: Float = 0f,
+    val rasterMaxZoom: Float = 19f,
+    val offlineRetentionPermitted: Boolean = true,
+    val vectorTileUrlTemplate: String = "https://tiles.openfreemap.org/planet/20261101_080013_pt/{z}/{x}/{y}.pbf"
 )
 
 object MapSourceRepository {
+
+    // Default Hybrid: Satellite raster imagery + OpenFreeMap OSM vector overlay
+    // Uses dependable global Esri World Imagery beneath OSM vector roads, highways, boundaries, and labels.
+    val HYBRID_SATELLITE_OSM = MapStyleDefinition(
+        id = "hybrid_satellite_osm",
+        displayName = "Hybrid (Satellite + OSM)",
+        styleUri = "https://tiles.openfreemap.org/styles/liberty",
+        attribution = "© Esri, Maxar, Earthstar Geographics © OpenFreeMap © OpenStreetMap contributors",
+        providerName = "Hybrid (Satellite + OSM)",
+        isTemporaryDevelopmentStyle = false,
+        licenseNotes = "Composite style: Satellite raster imagery rendered beneath OSM vector features. Online viewing permitted; permanent offline retention restricted by imagery provider license.",
+        isCompositeHybrid = true,
+        rasterSourceUri = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        rasterMinZoom = 0f,
+        rasterMaxZoom = 19f,
+        offlineRetentionPermitted = false // Raster imagery is online/cache only; OSM vector data is retained
+    )
+
+    // OpenAerialMap Hybrid candidate (Zoom 14+ imagery, CC-BY 4.0)
+    val HYBRID_OAM_OSM = MapStyleDefinition(
+        id = "hybrid_oam_osm",
+        displayName = "Hybrid (OpenAerialMap + OSM)",
+        styleUri = "https://tiles.openfreemap.org/styles/liberty",
+        attribution = "© OpenAerialMap / Open Imagery Network contributors (CC-BY 4.0) © OpenFreeMap © OpenStreetMap contributors",
+        providerName = "OpenAerialMap",
+        isTemporaryDevelopmentStyle = false,
+        licenseNotes = "Contributed aerial imagery under CC-BY 4.0. Patchy coverage; zoom 14+ serves visual imagery.",
+        isCompositeHybrid = true,
+        rasterSourceUri = "https://global.imagery.hotosm.org/{z}/{x}/{y}.png",
+        rasterMinZoom = 14f,
+        rasterMaxZoom = 19f,
+        offlineRetentionPermitted = true
+    )
+
     // OpenFreeMap Liberty Vector Style
-    // Features full OSM vector dataset: highways, local streets, road names, water, land,
-    // building footprints, and points of interest (POIs).
-    // Powered by OpenMapTiles vector schema, hosted by OpenFreeMap.
     val OPEN_FREE_MAP_LIBERTY = MapStyleDefinition(
         id = "openfreemap_liberty",
         displayName = "OpenFreeMap Liberty (Vector)",
@@ -28,10 +65,12 @@ object MapSourceRepository {
         attribution = "© OpenFreeMap © OpenMapTiles © OpenStreetMap contributors",
         providerName = "OpenFreeMap",
         isTemporaryDevelopmentStyle = false,
-        licenseNotes = "OpenFreeMap free vector tiles for development and testing. Self-hosting via PMTiles recommended for offline/bulk production."
+        licenseNotes = "OpenFreeMap free vector tiles. Vector data retained for offline viewing.",
+        isCompositeHybrid = false,
+        offlineRetentionPermitted = true
     )
 
-    // OpenFreeMap Bright Vector Style (High contrast clean streets and labels)
+    // OpenFreeMap Bright Vector Style
     val OPEN_FREE_MAP_BRIGHT = MapStyleDefinition(
         id = "openfreemap_bright",
         displayName = "OpenFreeMap Bright (Vector)",
@@ -39,10 +78,12 @@ object MapSourceRepository {
         attribution = "© OpenFreeMap © OpenMapTiles © OpenStreetMap contributors",
         providerName = "OpenFreeMap",
         isTemporaryDevelopmentStyle = false,
-        licenseNotes = "OpenFreeMap bright style. OpenStreetMap data under ODbL."
+        licenseNotes = "OpenFreeMap bright style. OpenStreetMap data under ODbL.",
+        isCompositeHybrid = false,
+        offlineRetentionPermitted = true
     )
 
-    // OpenFreeMap Positron (Subtle, muted vector style ideal for data overlay)
+    // OpenFreeMap Positron (Subtle, muted vector style)
     val OPEN_FREE_MAP_POSITRON = MapStyleDefinition(
         id = "openfreemap_positron",
         displayName = "OpenFreeMap Positron (Vector)",
@@ -50,10 +91,12 @@ object MapSourceRepository {
         attribution = "© OpenFreeMap © OpenMapTiles © OpenStreetMap contributors",
         providerName = "OpenFreeMap",
         isTemporaryDevelopmentStyle = false,
-        licenseNotes = "OpenFreeMap positron muted vector style."
+        licenseNotes = "OpenFreeMap positron muted vector style.",
+        isCompositeHybrid = false,
+        offlineRetentionPermitted = true
     )
 
-    // Temporary diagnostic vector style for rendering pipeline verification
+    // Temporary diagnostic vector style for engine verification
     val MAPLIBRE_DEMO_TILES = MapStyleDefinition(
         id = "maplibre_demo",
         displayName = "MapLibre Demo (Diagnostic)",
@@ -61,10 +104,12 @@ object MapSourceRepository {
         attribution = "© MapLibre © OpenStreetMap contributors",
         providerName = "MapLibre",
         isTemporaryDevelopmentStyle = true,
-        licenseNotes = "Temporary lightweight diagnostic style (macro continental vector) used for engine rendering verification."
+        licenseNotes = "Temporary lightweight diagnostic style used for engine rendering verification.",
+        isCompositeHybrid = false,
+        offlineRetentionPermitted = false
     )
 
-    // OpenStreetMap standard fallback style (rendered via MapLibre raster specification)
+    // OpenStreetMap standard fallback style
     val OSM_RASTER_DEV = MapStyleDefinition(
         id = "osm_raster",
         displayName = "OSM Standard (Raster)",
@@ -72,23 +117,14 @@ object MapSourceRepository {
         attribution = "© OpenStreetMap contributors (ODbL)",
         providerName = "OpenStreetMap",
         isTemporaryDevelopmentStyle = true,
-        licenseNotes = "Standard OSM raster tile fallback. Subject to OSM tile usage policies."
-    )
-
-    // Hybrid Satellite + OSM Vector Overlay (Intended Product Architecture Foundation)
-    // Composes satellite raster imagery beneath OSM vector highways, streets, boundaries, and labels.
-    val HYBRID_SATELLITE_OSM = MapStyleDefinition(
-        id = "hybrid_satellite_osm",
-        displayName = "Hybrid (Satellite + OSM)",
-        styleUri = "https://tiles.openfreemap.org/styles/liberty",
-        attribution = "© OpenAerialMap / Esri / OpenFreeMap © OpenStreetMap contributors",
-        providerName = "Hybrid",
-        isTemporaryDevelopmentStyle = false,
-        licenseNotes = "Hybrid composite: Satellite imagery beneath OSM vector features. Provider license governed by OpenAerialMap (CC-BY 4.0) / Esri Export authorization."
+        licenseNotes = "Standard OSM raster tile fallback. Subject to OSM tile usage policies.",
+        isCompositeHybrid = false,
+        offlineRetentionPermitted = false
     )
 
     val availableStyles = listOf(
         HYBRID_SATELLITE_OSM,
+        HYBRID_OAM_OSM,
         OPEN_FREE_MAP_LIBERTY,
         OPEN_FREE_MAP_BRIGHT,
         OPEN_FREE_MAP_POSITRON,
@@ -96,8 +132,8 @@ object MapSourceRepository {
         OSM_RASTER_DEV
     )
 
-    // OpenFreeMap Liberty is the default vector style
-    val defaultStyle = OPEN_FREE_MAP_LIBERTY
+    // Intended product default is the Hybrid (Satellite + OSM) map
+    val defaultStyle = HYBRID_SATELLITE_OSM
 
     fun getStyleById(id: String): MapStyleDefinition {
         return availableStyles.firstOrNull { it.id == id } ?: defaultStyle

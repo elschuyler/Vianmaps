@@ -23,7 +23,7 @@ data class AppUserPreferences(
     val cameraState: MapCameraState = MapCameraState(),
     val isTopPanelCollapsed: Boolean = true,
     val isInternetEnabled: Boolean = true,
-    val selectedStyleId: String = "openfreemap_liberty"
+    val selectedStyleId: String = "hybrid_satellite_osm"
 )
 
 class AppPreferencesRepository(private val context: Context) {
@@ -47,10 +47,10 @@ class AppPreferencesRepository(private val context: Context) {
         val northLocked = prefs[Keys.NORTH_LOCKED] ?: false
         val collapsed = prefs[Keys.TOP_PANEL_COLLAPSED] ?: true
         val internet = prefs[Keys.INTERNET_ENABLED] ?: true
-        // Default to OpenFreeMap Liberty and migrate any legacy test-only maplibre_demo default
+        // Default to Hybrid (Satellite + OSM)
         val savedStyleId = prefs[Keys.SELECTED_STYLE_ID]
         val styleId = if (savedStyleId == null || savedStyleId == "maplibre_demo") {
-            "openfreemap_liberty"
+            "hybrid_satellite_osm"
         } else {
             savedStyleId
         }

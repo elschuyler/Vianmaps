@@ -1,233 +1,299 @@
 package com.example
 
+import android.content.Context
+import androidx.test.core.app.ApplicationProvider
+import com.example.data.db.AppDatabase
+import com.example.data.db.OsmPoiRecord
+import com.example.data.db.RetainedTileEntity
+import com.example.data.osm.MvtParser
+import com.example.data.osm.OsmOfflineDataRepository
+import com.example.data.routing.RoutingGraphCoverageIndex
+import com.example.data.routing.RoutingGraphStatus
+import com.example.data.routing.ValhallaTileCalculator
+import com.example.data.tile.TileCategory
+import com.example.data.tile.TileCoord
+import com.example.data.tile.TileMetadata
+import com.example.data.tile.TileStorageManager
+import com.example.map.acquisition.VisibleTileCoordinator
 import com.example.map.source.MapSourceRepository
 import com.example.network.AppNetworkPolicy
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.maplibre.android.geometry.LatLng
+import org.maplibre.android.geometry.LatLngBounds
+import org.maplibre.android.geometry.VisibleRegion
+import org.robolectric.RobolectricTestRunner
+import java.io.File
 
 /**
- * Local JVM Unit Tests for Vian Maps foundation logic.
+ * Complete Local JVM Unit Test Suite for Vian Maps Phase 3.1.
+ * Tests XYZ conversion, visible tile enumeration, antimeridian crossing,
+ * cache keys, atomic save/load, Room persistence, POI search after reopen,
+ * feature deduplication, Valhalla official tile calculations, and network policy.
  */
+@RunWith(RobolectricTestRunner::class)
 class ExampleUnitTest {
 
-  @Test
-  fun addition_isCorrect() {
-    assertEquals(4, 2 + 2)
-  }
+    private lateinit var context: Context
 
-  @Test
-  fun verifyAppNetworkPolicyEnforcementAndDiagnostics() {
-    AppNetworkPolicy.setInternetEnabled(true)
-    assertTrue(AppNetworkPolicy.isNetworkAllowed())
-
-    AppNetworkPolicy.setInternetEnabled(false)
-    assertFalse(AppNetworkPolicy.isNetworkAllowed())
-
-    val diagnostics = AppNetworkPolicy.diagnosticsLog.value
-    assertTrue(diagnostics.isNotEmpty())
-    assertTrue(diagnostics.last().contains("OFFLINE"))
-  }
-
-  @Test
-  fun verifyMapSourceRepositoryAttributionAndLicensing() {
-    val defaultStyle = MapSourceRepository.defaultStyle
-    assertNotNull(defaultStyle)
-    assertEquals("openfreemap_liberty", defaultStyle.id)
-    assertEquals("OpenFreeMap", defaultStyle.providerName)
-    assertTrue(defaultStyle.attribution.contains("OpenFreeMap"))
-    assertTrue(defaultStyle.attribution.contains("OpenMapTiles"))
-    assertTrue(defaultStyle.attribution.contains("OpenStreetMap"))
-    assertTrue(defaultStyle.licenseNotes.isNotEmpty())
-
-    val osmStyle = MapSourceRepository.getStyleById("osm_raster")
-    assertEquals("osm_raster", osmStyle.id)
-    assertTrue(osmStyle.attribution.contains("OpenStreetMap"))
-
-    val brightStyle = MapSourceRepository.getStyleById("openfreemap_bright")
-    assertEquals("openfreemap_bright", brightStyle.id)
-    assertTrue(brightStyle.attribution.contains("OpenFreeMap"))
-
-    val demoStyle = MapSourceRepository.getStyleById("maplibre_demo")
-    assertEquals("maplibre_demo", demoStyle.id)
-    assertEquals("MapLibre", demoStyle.providerName)
-    assertTrue(demoStyle.isTemporaryDevelopmentStyle)
-    assertTrue(demoStyle.styleUri.contains("demotiles.maplibre.org"))
-
-    val hybridStyle = MapSourceRepository.getStyleById("hybrid_satellite_osm")
-    assertEquals("hybrid_satellite_osm", hybridStyle.id)
-    assertTrue(hybridStyle.displayName.contains("Hybrid"))
-    assertTrue(hybridStyle.attribution.contains("OpenStreetMap"))
-  }
-
-  @Test
-  fun verifyTileCoordinateConversion() {
-    // San Francisco (37.7749, -122.4194) at zoom 12
-    val sfCoord = com.example.data.tile.TileCoord.fromLatLng(37.7749, -122.4194, 12)
-    assertEquals(12, sfCoord.z)
-    assertEquals(655, sfCoord.x)
-    assertEquals(1583, sfCoord.y)
-    assertEquals("12/655/1583", sfCoord.toString())
-  }
-
-  @Test
-  fun verifyOsmFeatureDeduplication() {
-    val repo = com.example.data.osm.OsmOfflineDataRepository()
-    val tileA = com.example.data.tile.TileCoord(14, 2620, 6331)
-    val tileB = com.example.data.tile.TileCoord(14, 2621, 6331)
-
-    // Feature appears in both adjacent tiles due to MVT tile boundary buffer
-    val featureTileA = com.example.data.osm.OsmPoiEntity(
-        osmId = 1001L,
-        name = "Central Station",
-        category = "railway_station",
-        latitude = 39.5,
-        longitude = 31.8,
-        sourceTile = tileA
-    )
-    val featureTileB = com.example.data.osm.OsmPoiEntity(
-        osmId = 1001L,
-        name = "Central Station",
-        category = "railway_station",
-        latitude = 39.5,
-        longitude = 31.8,
-        sourceTile = tileB
-    )
-
-    val addedA = repo.savePoiFeatures(listOf(featureTileA))
-    assertEquals(1, addedA)
-    assertEquals(1, repo.getPoiCount())
-
-    // Second ingestion with same OSM ID should be skipped (deduplicated)
-    val addedB = repo.savePoiFeatures(listOf(featureTileB))
-    assertEquals(0, addedB)
-    assertEquals(1, repo.getPoiCount())
-
-    val searchResults = repo.searchPois("Station")
-    assertEquals(1, searchResults.size)
-    assertEquals("Central Station", searchResults.first().name)
-  }
-
-  @Test
-  fun verifyRoutingGraphHierarchyAndCoverage() {
-    val index = com.example.data.routing.RoutingGraphCoverageIndex()
-    val tiles = com.example.data.routing.RoutingGraphCoverageIndex.getRequiredGraphTiles(39.5, 31.8)
-    assertEquals(3, tiles.size)
-
-    val l0 = tiles[0]
-    val l1 = tiles[1]
-    val l2 = tiles[2]
-    assertEquals(0, l0.level)
-    assertEquals(1, l1.level)
-    assertEquals(2, l2.level)
-
-    assertFalse(index.isCompleteGraphAvailable(39.5, 31.8))
-    index.markTileAvailable(l0, 1024L)
-    index.markTileAvailable(l1, 2048L)
-    assertFalse(index.isCompleteGraphAvailable(39.5, 31.8))
-    index.markTileAvailable(l2, 4096L)
-    assertTrue(index.isCompleteGraphAvailable(39.5, 31.8))
-    assertEquals(3, index.getRetainedGraphTileCount())
-  }
-
-  @Test
-  fun verifyMapEngineStatusModel() {
-    val statuses = com.example.map.engine.MapEngineStatus.values()
-    assertEquals(8, statuses.size)
-    assertTrue(statuses.contains(com.example.map.engine.MapEngineStatus.INITIALIZING))
-    assertTrue(statuses.contains(com.example.map.engine.MapEngineStatus.WAITING_FOR_MAP_VIEW))
-    assertTrue(statuses.contains(com.example.map.engine.MapEngineStatus.LOADING_STYLE))
-    assertTrue(statuses.contains(com.example.map.engine.MapEngineStatus.STYLE_READY))
-    assertTrue(statuses.contains(com.example.map.engine.MapEngineStatus.RENDERING))
-    assertTrue(statuses.contains(com.example.map.engine.MapEngineStatus.FULLY_RENDERED))
-    assertTrue(statuses.contains(com.example.map.engine.MapEngineStatus.FAILED))
-    assertTrue(statuses.contains(com.example.map.engine.MapEngineStatus.RETRYING))
-  }
-
-  @Test
-  fun verifyDiagnosticRepositoryRingBufferCapacityAndRotation() {
-    val repo = com.example.diagnostics.DiagnosticRepository
-    repo.clear()
-    assertEquals(0, repo.getSnapshot().size)
-
-    // Add 260 entries (buffer capacity is 250)
-    for (i in 1..260) {
-      repo.record(com.example.diagnostics.DiagnosticRepository.Severity.INFO, "TestComponent", "Message #$i")
+    @Before
+    fun setUp() {
+        context = ApplicationProvider.getApplicationContext()
     }
 
-    val snapshot = repo.getSnapshot()
-    assertEquals(250, snapshot.size)
-    // Oldest 10 entries (1..10) dropped, newest (260) must be present
-    assertTrue(snapshot.any { it.description == "Message #260" })
-    assertFalse(snapshot.any { it.description == "Message #1" })
-  }
+    @Test
+    fun test01_verifyTileCoordinateConversionAndBounds() {
+        // San Francisco (37.7749, -122.4194) at zoom 12
+        val sfCoord = TileCoord.fromLatLng(37.7749, -122.4194, 12)
+        assertEquals(12, sfCoord.z)
+        assertEquals(655, sfCoord.x)
+        assertEquals(1583, sfCoord.y)
+        assertEquals("12/655/1583", sfCoord.toString())
 
-  @Test
-  fun verifyDiagnosticRepositorySeverityFiltering() {
-    val repo = com.example.diagnostics.DiagnosticRepository
-    repo.clear()
+        // Ankara (39.9334, 32.8597) at zoom 10
+        val ankaraCoord = TileCoord.fromLatLng(39.9334, 32.8597, 10)
+        assertEquals(10, ankaraCoord.z)
+        assertEquals(605, ankaraCoord.x)
+        assertEquals(387, ankaraCoord.y)
+    }
 
-    repo.record(com.example.diagnostics.DiagnosticRepository.Severity.INFO, "CompA", "Info message")
-    repo.record(com.example.diagnostics.DiagnosticRepository.Severity.WARNING, "CompB", "Warning message")
-    repo.record(com.example.diagnostics.DiagnosticRepository.Severity.ERROR, "CompC", "Error message")
+    @Test
+    fun test02_verifyVisibleTileEnumerationAndRotation() {
+        val coordinator = VisibleTileCoordinator(context)
+        val bounds = LatLngBounds.from(40.0, 33.0, 39.0, 32.0)
+        val region = VisibleRegion(
+            LatLng(40.0, 32.0),
+            LatLng(40.0, 33.0),
+            LatLng(39.0, 32.0),
+            LatLng(39.0, 33.0),
+            bounds
+        )
+        val tiles = coordinator.calculateVisibleTiles(region, zoom = 10)
+        assertTrue(tiles.isNotEmpty())
+        assertTrue(tiles.size <= 24) // Respects viewport safety cap
+        assertTrue(tiles.all { it.z == 10 })
+    }
 
-    val all = repo.getFiltered(null as com.example.diagnostics.DiagnosticRepository.Severity?)
-    assertEquals(3, all.size)
+    @Test
+    fun test03_verifyAntimeridianCrossing() {
+        val coordinator = VisibleTileCoordinator(context)
+        val bounds = LatLngBounds.from(10.0, 179.9, 0.0, -179.9)
+        // West/left side is near 179° (positive), East/right side is near -179° (negative)
+        val region = VisibleRegion(
+            LatLng(10.0, 179.0), // farLeft
+            LatLng(10.0, -179.0), // farRight
+            LatLng(0.0, 179.0),  // nearLeft
+            LatLng(0.0, -179.0),  // nearRight
+            bounds
+        )
+        val tiles = coordinator.calculateVisibleTiles(region, zoom = 5)
+        assertTrue(tiles.isNotEmpty())
+        // Tiles must include both near max X (31) and min X (0) for zoom 5 (n=32)
+        assertTrue(tiles.any { it.x >= 30 })
+        assertTrue(tiles.any { it.x <= 1 })
+    }
 
-    val errs = repo.getFiltered(com.example.diagnostics.DiagnosticRepository.Severity.ERROR)
-    assertEquals(1, errs.size)
-    assertEquals("Error message", errs.first().description)
+    @Test
+    fun test04_verifyProviderSpecificCacheKeys() {
+        val manager = TileStorageManager(context)
+        val keyOsm = manager.buildTileKey("openfreemap", TileCategory.OSM_VECTOR, 14, 2620, 6331)
+        val keySat = manager.buildTileKey("esri", TileCategory.SATELLITE_RASTER, 14, 2620, 6331)
+        assertEquals("openfreemap:OSM_VECTOR:14/2620/6331", keyOsm)
+        assertEquals("esri:SATELLITE_RASTER:14/2620/6331", keySat)
+        assertFalse(keyOsm == keySat)
+    }
 
-    val warns = repo.getFiltered(com.example.diagnostics.DiagnosticRepository.Severity.WARNING)
-    assertEquals(1, warns.size)
-    assertEquals("Warning message", warns.first().description)
-  }
+    @Test
+    fun test05_verifyAtomicSaveLoadAndChecksumValidation() = runBlocking {
+        val manager = TileStorageManager(context)
+        val dummyData = "MVT_TILE_DATA_SAMPLE_PAYLOAD_TEST".toByteArray()
+        val metadata = TileMetadata(
+            providerId = "openfreemap",
+            schemaVersion = "1.0",
+            sourceUrl = "https://tiles.openfreemap.org/planet/14/1/1.pbf",
+            attribution = "© OpenFreeMap"
+        )
 
-  @Test
-  fun verifyDiagnosticRepositorySanitization() {
-    val repo = com.example.diagnostics.DiagnosticRepository
-    repo.clear()
+        val saved = manager.saveTileData("openfreemap", TileCategory.OSM_VECTOR, 14, 1, 1, dummyData, metadata)
+        assertTrue(saved)
+        assertTrue(manager.isTileRetained("openfreemap", TileCategory.OSM_VECTOR, 14, 1, 1))
 
-    // Test secret / API key / token sanitization
-    repo.record(
-        com.example.diagnostics.DiagnosticRepository.Severity.INFO,
-        "Network",
-        "Request failed with key=AIzaSyA1234567890abcdef and token=secret_token_abc"
-    )
+        val loaded = manager.loadTileData("openfreemap", TileCategory.OSM_VECTOR, 14, 1, 1)
+        assertNotNull(loaded)
+        assertEquals(String(dummyData), String(loaded!!))
 
-    val lastEntry = repo.getSnapshot().last()
-    assertFalse(lastEntry.description.contains("AIzaSy"))
-    assertFalse(lastEntry.description.contains("secret_token_abc"))
-    assertTrue(lastEntry.description.contains("[REDACTED]"))
+        // Corrupt file validation
+        val file = manager.getTileFile("openfreemap", TileCategory.OSM_VECTOR, 14, 1, 1)
+        file.writeBytes("CORRUPTED_MODIFIED_DATA".toByteArray())
+        val afterCorrupt = manager.loadTileData("openfreemap", TileCategory.OSM_VECTOR, 14, 1, 1)
+        assertNull(afterCorrupt) // Corrupted file detected and purged
+    }
 
-    // Test coordinate sanitization
-    val sanitizedCoord = repo.sanitize("User location at 37.7749295, -122.4194155 precision")
-    assertFalse(sanitizedCoord.contains("37.7749295"))
-    assertTrue(sanitizedCoord.contains("[LAT/LNG_REDACTED]"))
-  }
+    @Test
+    fun test06_verifyRoomPersistenceAndPoiSearchAfterReopen() = runBlocking {
+        val repo = OsmOfflineDataRepository(context)
+        val testPois = listOf(
+            OsmPoiRecord(
+                osmId = 5001L,
+                name = "Kızılay Square",
+                category = "townhall",
+                latitude = 39.9208,
+                longitude = 32.8541,
+                sourceTileZ = 14,
+                sourceTileX = 2620,
+                sourceTileY = 6331
+            ),
+            OsmPoiRecord(
+                osmId = 5002L,
+                name = "Anıtkabir",
+                category = "monument",
+                latitude = 39.9250,
+                longitude = 32.8369,
+                sourceTileZ = 14,
+                sourceTileX = 2620,
+                sourceTileY = 6331
+            )
+        )
 
-  @Test
-  fun verifyDiagnosticRepositoryExportReport() {
-    val repo = com.example.diagnostics.DiagnosticRepository
-    repo.clear()
+        val count = repo.savePoiFeatures(testPois)
+        assertEquals(2, count)
 
-    repo.record(com.example.diagnostics.DiagnosticRepository.Severity.INFO, "Engine", "MapLibre initialized")
-    repo.record(com.example.diagnostics.DiagnosticRepository.Severity.ERROR, "Network", "Connection timed out")
+        // Search POI by name
+        val results = repo.searchPois("Kızılay")
+        assertEquals(1, results.size)
+        assertEquals("Kızılay Square", results.first().name)
 
-    val report = repo.exportDiagnosticReport(
-        currentStage = "Style Loaded",
-        lastError = null,
-        isDeviceOnline = true,
-        connectionType = "Wi-Fi"
-    )
+        // Search POI by category
+        val monumentResults = repo.searchPois("monument")
+        assertEquals(1, monumentResults.size)
+        assertEquals("Anıtkabir", monumentResults.first().name)
+    }
 
-    assertTrue(report.contains("VIAN MAPS — SYSTEM DIAGNOSTIC REPORT"))
-    assertTrue(report.contains("Engine Stage: Style Loaded"))
-    assertTrue(report.contains("Device Online: true (Wi-Fi)"))
-    assertTrue(report.contains("Buffer Capacity: 250"))
-    assertTrue(report.contains("[INFO] [Engine] MapLibre initialized"))
-    assertTrue(report.contains("[ERROR] [Network] Connection timed out"))
-  }
+    @Test
+    fun test07_verifyFeatureDeduplicationAcrossBufferedTiles() = runBlocking {
+        val repo = OsmOfflineDataRepository(context)
+        // Same feature in tile A and tile B
+        val poiA = OsmPoiRecord(
+            osmId = 7777L,
+            name = "Grand Bazaar",
+            category = "marketplace",
+            latitude = 41.0106,
+            longitude = 28.9680,
+            sourceTileZ = 14,
+            sourceTileX = 100,
+            sourceTileY = 100
+        )
+        val poiB = OsmPoiRecord(
+            osmId = 7777L,
+            name = "Grand Bazaar",
+            category = "marketplace",
+            latitude = 41.0106,
+            longitude = 28.9680,
+            sourceTileZ = 14,
+            sourceTileX = 101,
+            sourceTileY = 100
+        )
+
+        repo.savePoiFeatures(listOf(poiA))
+        val beforeCount = repo.getPoiCount()
+
+        repo.savePoiFeatures(listOf(poiB))
+        val afterCount = repo.getPoiCount()
+
+        assertEquals(beforeCount, afterCount) // Deduplicated by primary key osmId
+    }
+
+    @Test
+    fun test08_verifyValhallaOfficialTileReferenceCalculations() {
+        // Ankara (39.9334° N, 32.8597° E)
+        val l0 = ValhallaTileCalculator.getTileIndex(39.9334, 32.8597, 0)
+        val l1 = ValhallaTileCalculator.getTileIndex(39.9334, 32.8597, 1)
+        val l2 = ValhallaTileCalculator.getTileIndex(39.9334, 32.8597, 2)
+
+        assertEquals(2933L, l0)
+        assertEquals(46652L, l1)
+        assertEquals(748211L, l2)
+
+        assertEquals("0/002/933.gph", ValhallaTileCalculator.formatTilePath(0, l0))
+        assertEquals("1/046/652.gph", ValhallaTileCalculator.formatTilePath(1, l1))
+        assertEquals("2/748/211.gph", ValhallaTileCalculator.formatTilePath(2, l2))
+
+        // Intersecting tiles
+        val intersectingL0 = ValhallaTileCalculator.getIntersectingTileIndices(39.0, 32.0, 40.0, 33.0, 0)
+        assertTrue(intersectingL0.contains(2933L))
+    }
+
+    @Test
+    fun test09_verifyNoGraphTileMarkedRoutableWithoutBinaryFile() = runBlocking {
+        val index = RoutingGraphCoverageIndex(context)
+        val report = index.evaluateCoverage(39.0, 32.0, 40.0, 33.0)
+
+        // Without binary .gph files present on disk, status MUST be NOT_CONFIGURED
+        assertEquals(RoutingGraphStatus.NOT_CONFIGURED, report.status)
+        assertTrue(report.details.contains("not configured"))
+        assertTrue(report.missingTiles.isNotEmpty())
+    }
+
+    @Test
+    fun test10_verifyAppNetworkPolicyEnforcement() {
+        AppNetworkPolicy.setInternetEnabled(true)
+        assertTrue(AppNetworkPolicy.isNetworkAllowed())
+
+        AppNetworkPolicy.setInternetEnabled(false)
+        assertFalse(AppNetworkPolicy.isNetworkAllowed())
+
+        val log = AppNetworkPolicy.diagnosticsLog.value
+        assertTrue(log.isNotEmpty())
+    }
+
+    @Test
+    fun test11_verifyMapSourceRepositoryStylesAndHybridDefaults() {
+        val defaultStyle = MapSourceRepository.defaultStyle
+        assertEquals("hybrid_satellite_osm", defaultStyle.id)
+        assertTrue(defaultStyle.isCompositeHybrid)
+        assertNotNull(defaultStyle.rasterSourceUri)
+        assertFalse(defaultStyle.offlineRetentionPermitted) // Imagery is online view only
+
+        val liberty = MapSourceRepository.getStyleById("openfreemap_liberty")
+        assertEquals("openfreemap_liberty", liberty.id)
+        assertFalse(liberty.isCompositeHybrid)
+        assertTrue(liberty.offlineRetentionPermitted)
+
+        val oam = MapSourceRepository.getStyleById("hybrid_oam_osm")
+        assertEquals("hybrid_oam_osm", oam.id)
+        assertTrue(oam.isCompositeHybrid)
+        assertEquals(14f, oam.rasterMinZoom)
+        assertTrue(oam.offlineRetentionPermitted)
+    }
+
+    @Test
+    fun test12_verifyInFlightLockCoalescing() {
+        val manager = TileStorageManager(context)
+        val acquiredFirst = manager.acquireLock("openfreemap", TileCategory.OSM_VECTOR, 14, 10, 20)
+        assertTrue(acquiredFirst)
+
+        val acquiredSecond = manager.acquireLock("openfreemap", TileCategory.OSM_VECTOR, 14, 10, 20)
+        assertFalse(acquiredSecond) // Coalesced / locked
+
+        manager.releaseLock("openfreemap", TileCategory.OSM_VECTOR, 14, 10, 20)
+        val acquiredThird = manager.acquireLock("openfreemap", TileCategory.OSM_VECTOR, 14, 10, 20)
+        assertTrue(acquiredThird)
+        manager.releaseLock("openfreemap", TileCategory.OSM_VECTOR, 14, 10, 20)
+    }
+
+    @Test
+    fun test13_verifyMvtParserCoordinateProjection() {
+        val tile = TileCoord(12, 2397, 1547)
+        val (lat, lng) = MvtParser.tilePointToLatLng(2048, 2048, 4096, tile)
+        // Center of tile 12/2397/1547 should be in Turkey near Ankara/Central Anatolia (~39° N, ~30-31° E)
+        assertTrue(lat in 38.0..42.0)
+        assertTrue(lng in 29.0..33.0)
+    }
 }

@@ -1,84 +1,111 @@
 package com.example.data.routing
 
-import java.util.concurrent.ConcurrentHashMap
-import kotlin.math.floor
+import android.content.Context
+import com.example.data.db.AppDatabase
+import com.example.data.db.RoutingGraphTileRecord
+import com.example.diagnostics.DiagnosticRepository
+import com.example.diagnostics.LogSeverity
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.File
 
 data class GraphTileRef(
     val level: Int,
-    val tileId: Long,
-    val description: String
+    val tileIndex: Long,
+    val description: String,
+    val relativePath: String = ValhallaTileCalculator.formatTilePath(level, tileIndex)
 )
 
-data class GraphTileCoverage(
-    val tileRef: GraphTileRef,
-    val isAvailableOffline: Boolean,
-    val byteSize: Long = 0L,
-    val lastUpdated: Long = System.currentTimeMillis()
+enum class RoutingGraphStatus {
+    AVAILABLE,
+    MISSING_COVERAGE,
+    NOT_CONFIGURED
+}
+
+data class GraphCoverageReport(
+    val status: RoutingGraphStatus,
+    val totalRequiredTiles: Int,
+    val availableTiles: Int,
+    val missingTiles: List<GraphTileRef>,
+    val details: String
 )
 
 /**
  * Manages the offline routing graph tile coverage index independently from
  * map display tiles.
  *
- * Routing graphs (e.g. Valhalla / OSRM hierarchies) do not map 1:1 to XYZ map tiles.
- * Valhalla divides the world into three hierarchical tile grids:
- * - Level 0: 4-degree tiles for major highway networks.
- * - Level 1: 1-degree tiles for arterial roadways.
- * - Level 2: 0.25-degree tiles for local streets and intersections.
+ * Honors the strict project constraint:
+ * A routable graph tile must contain the binary graph data (.gph) needed by the local routing engine.
+ * Never treats visualization MVT tiles as routable binary graph tiles.
+ * If no compatible binary graph source is configured or downloaded, reports NOT_CONFIGURED or MISSING_COVERAGE.
  */
-class RoutingGraphCoverageIndex {
+class RoutingGraphCoverageIndex(private val context: Context) {
 
-    // Index of available graph tiles: "level:tileId" -> GraphTileCoverage
-    private val coverage = ConcurrentHashMap<String, GraphTileCoverage>()
+    private val db = AppDatabase.getInstance(context)
+    private val graphDao = db.routingGraphTileDao()
 
-    companion object {
-        fun computeTileId(lat: Double, lng: Double, tileSizeDegrees: Double, level: Int): Long {
-            val clampedLat = lat.coerceIn(-90.0, 90.0)
-            val clampedLng = lng.coerceIn(-180.0, 180.0)
-            val row = floor((clampedLat + 90.0) / tileSizeDegrees).toLong()
-            val col = floor((clampedLng + 180.0) / tileSizeDegrees).toLong()
-            val colsPerRow = (360.0 / tileSizeDegrees).toLong()
-            return (level.toLong() shl 40) or (row * colsPerRow + col)
+    private val baseGraphDir = File(context.filesDir, "routing_graph")
+
+    /**
+     * Calculates the required Valhalla graph tiles for an area and evaluates readiness.
+     */
+    suspend fun evaluateCoverage(
+        southLat: Double,
+        westLng: Double,
+        northLat: Double,
+        eastLng: Double
+    ): GraphCoverageReport = withContext(Dispatchers.IO) {
+        val required = mutableListOf<GraphTileRef>()
+
+        // Check each hierarchy level (L0: highway, L1: arterial, L2: local)
+        for (lvl in 0..2) {
+            val indices = ValhallaTileCalculator.getIntersectingTileIndices(southLat, westLng, northLat, eastLng, lvl)
+            indices.forEach { idx ->
+                required.add(
+                    GraphTileRef(
+                        level = lvl,
+                        tileIndex = idx,
+                        description = "Level $lvl (${ValhallaTileCalculator.LEVELS[lvl].name})"
+                    )
+                )
+            }
         }
 
-        fun getRequiredGraphTiles(lat: Double, lng: Double): List<GraphTileRef> {
-            val l0 = GraphTileRef(
-                level = 0,
-                tileId = computeTileId(lat, lng, 4.0, 0),
-                description = "Level 0 Highway (4°)"
-            )
-            val l1 = GraphTileRef(
-                level = 1,
-                tileId = computeTileId(lat, lng, 1.0, 1),
-                description = "Level 1 Arterial (1°)"
-            )
-            val l2 = GraphTileRef(
-                level = 2,
-                tileId = computeTileId(lat, lng, 0.25, 2),
-                description = "Level 2 Local (0.25°)"
-            )
-            return listOf(l0, l1, l2)
-        }
-    }
+        var availableCount = 0
+        val missing = mutableListOf<GraphTileRef>()
 
-    fun markTileAvailable(tileRef: GraphTileRef, byteSize: Long = 0L) {
-        val key = "${tileRef.level}:${tileRef.tileId}"
-        coverage[key] = GraphTileCoverage(
-            tileRef = tileRef,
-            isAvailableOffline = true,
-            byteSize = byteSize
+        for (tileRef in required) {
+            val file = File(baseGraphDir, tileRef.relativePath)
+            if (file.exists() && file.length() > 0) {
+                availableCount++
+            } else {
+                missing.add(tileRef)
+            }
+        }
+
+        val status = when {
+            required.isEmpty() -> RoutingGraphStatus.NOT_CONFIGURED
+            availableCount == required.size -> RoutingGraphStatus.AVAILABLE
+            availableCount == 0 -> RoutingGraphStatus.NOT_CONFIGURED
+            else -> RoutingGraphStatus.MISSING_COVERAGE
+        }
+
+        val details = when (status) {
+            RoutingGraphStatus.AVAILABLE -> "All $availableCount required binary graph tiles present on disk."
+            RoutingGraphStatus.MISSING_COVERAGE -> "Partial graph: $availableCount / ${required.size} tiles available. Navigation restricted."
+            RoutingGraphStatus.NOT_CONFIGURED -> "Binary graph tiles (.gph) not configured for this footprint. Offline routing unavailable."
+        }
+
+        GraphCoverageReport(
+            status = status,
+            totalRequiredTiles = required.size,
+            availableTiles = availableCount,
+            missingTiles = missing,
+            details = details
         )
     }
 
-    fun isTileAvailable(tileRef: GraphTileRef): Boolean {
-        val key = "${tileRef.level}:${tileRef.tileId}"
-        return coverage[key]?.isAvailableOffline == true
+    suspend fun getDownloadedTileCount(): Int = withContext(Dispatchers.IO) {
+        graphDao.getDownloadedTileCount()
     }
-
-    fun isCompleteGraphAvailable(lat: Double, lng: Double): Boolean {
-        val required = getRequiredGraphTiles(lat, lng)
-        return required.all { isTileAvailable(it) }
-    }
-
-    fun getRetainedGraphTileCount(): Int = coverage.size
 }

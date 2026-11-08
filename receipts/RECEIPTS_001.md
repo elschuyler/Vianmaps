@@ -423,3 +423,38 @@
   - Clean debug APK build verified via `gradle assembleDebug` (BUILD SUCCESSFUL in 2s, output at `app/build/outputs/apk/debug/app-debug.apk`).
 * **Deviations from request**: None. Preserved native MapLibre engine, existing Compose architecture, and UI layout.
 * **Known issues / follow-up**: Physical on-device run needed to inspect Log Keeper hardware and lifecycle logs.
+
+---
+
+### Phase 3.1: Complete Hybrid Map, Visible-Tile Acquisition & Offline Pipeline
+* **Timestamp**: 2026-11-08T00:55:00-08:00
+* **Summary**: Delivered genuine MapLibre composite Hybrid map, live visible-tile acquisition coordinator, MVT vector tile decoder, Room offline database, and Valhalla graph coverage evaluation.
+* **Exact files touched**:
+  - `app/src/main/java/com/example/data/db/AppDatabase.kt` (created Room database, entities, DAOs)
+  - `app/src/main/java/com/example/data/osm/MvtParser.kt` (created pure Kotlin protobuf MVT decoder)
+  - `app/src/main/java/com/example/data/osm/OsmOfflineDataRepository.kt` (Room persistence & offline POI search)
+  - `app/src/main/java/com/example/data/tile/TileStorageManager.kt` (atomic writes, CRC32 checksums, MapLibre putResourceWithUrl)
+  - `app/src/main/java/com/example/data/routing/ValhallaTileCalculator.kt` (created official Valhalla 3-level tile math)
+  - `app/src/main/java/com/example/data/routing/RoutingGraphCoverageIndex.kt` (Valhalla evaluation & honest NOT_CONFIGURED status)
+  - `app/src/main/java/com/example/map/source/MapSourceRepository.kt` (composite hybrid styles, attribution, license metadata)
+  - `app/src/main/java/com/example/map/engine/MapEngineController.kt` (dynamic raster layer composition & idle acquisition trigger)
+  - `app/src/main/java/com/example/map/acquisition/VisibleTileCoordinator.kt` (created visible-tile coordinator with TOS limits)
+  - `app/src/main/java/com/example/data/preferences/AppPreferencesRepository.kt` (aligned default style to hybrid_satellite_osm)
+  - `app/src/main/java/com/example/ui/screens/MainMapScreen.kt` (wired coordinator cancellation on dispose)
+  - `app/src/test/java/com/example/ExampleUnitTest.kt` (13 comprehensive unit tests, all passing)
+  - `BLUEPRINT.md`
+  - `receipts/RECEIPTS_001.md`
+* **What was actually done**:
+  - Created genuine MapLibre composite Hybrid style in `MapEngineController.kt` injecting satellite raster imagery source/layer (`satellite-raster-source`) beneath OSM vector overlays while hiding opaque landcover/landuse polygon fills and setting water opacity to 0.35.
+  - Implemented Room Database (`AppDatabase.kt`) containing tables for retained tiles, POIs, buildings, regions, roads, and routing graph tiles with full DAO support.
+  - Built zero-dependency pure Kotlin `MvtParser.kt` handling gzip decompression, protobuf tag parsing, packed zigzag geometry decoding, and tile-to-lat/lng coordinate normalization.
+  - Refactored `OsmOfflineDataRepository.kt` to persist extracted OSM features directly to Room and provide persistent offline POI search across process restarts.
+  - Refactored `TileStorageManager.kt` with atomic file writes (temp file + atomic rename), CRC32 checksum verification, Room metadata sync, and native MapLibre `OfflineManager.putResourceWithUrl` resource injection for offline rendering playback.
+  - Built `ValhallaTileCalculator.kt` implementing official Valhalla 3-level hierarchy math (L0: 4°, L1: 1°, L2: 0.25°) and bounding-box intersection calculations, and updated `RoutingGraphCoverageIndex.kt` to honestly report `NOT_CONFIGURED` or `MISSING_COVERAGE` when local binary `.gph` files are absent.
+  - Built `VisibleTileCoordinator.kt` connecting live MapLibre camera viewport to tile acquisition with 750ms debouncing, antimeridian handling, OpenFreeMap TOS limits (max 4 parallel connections, 3,000 tiles / 50MB session caps), and instant pause on `AppNetworkPolicy` Internet OFF.
+* **How it was verified**:
+  - Verified local JVM unit test suite via `gradle :app:testDebugUnitTest`: 13/13 tests passed (BUILD SUCCESSFUL).
+  - Verified container applet build via `compile_applet` (BUILD SUCCEEDED).
+  - Verified debug APK build via `gradle assembleDebug` (BUILD SUCCESSFUL in 8s, output at `app/build/outputs/apk/debug/app-debug.apk`).
+* **Deviations from request**: None.
+* **Known issues / follow-up**: Physical on-device run to test visual satellite tiles over network and verify offline tile playback in airplane mode.

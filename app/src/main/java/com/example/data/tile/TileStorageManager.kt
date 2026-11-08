@@ -1,11 +1,17 @@
 package com.example.data.tile
 
 import android.content.Context
+import com.example.data.db.AppDatabase
+import com.example.data.db.RetainedTileEntity
 import com.example.diagnostics.DiagnosticRepository
 import com.example.diagnostics.LogSeverity
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import org.maplibre.android.offline.OfflineManager
 import java.io.File
 import java.io.FileOutputStream
 import java.util.concurrent.ConcurrentHashMap
+import java.util.zip.CRC32
 import kotlin.math.PI
 import kotlin.math.asinh
 import kotlin.math.atan
@@ -31,13 +37,6 @@ data class TileCoord(val z: Int, val x: Int, val y: Int) {
     }
 }
 
-data class TileBoundingBox(
-    val northLat: Double,
-    val southLat: Double,
-    val westLng: Double,
-    val eastLng: Double
-)
-
 enum class TileCategory(val dirName: String) {
     SATELLITE_RASTER("satellite_raster"),
     OSM_VECTOR("osm_vector"),
@@ -49,11 +48,14 @@ enum class TileCategory(val dirName: String) {
 
 data class TileMetadata(
     val providerId: String,
-    val schemaVersion: String,
+    val schemaVersion: String = "1.0",
     val fetchTimestamp: Long = System.currentTimeMillis(),
     val etag: String? = null,
     val byteSize: Long = 0L,
-    val attribution: String = ""
+    val sourceUrl: String = "",
+    val attribution: String = "",
+    val retentionPermission: String = "PERMITTED",
+    val checksum: String = ""
 )
 
 data class TileStorageStats(
@@ -63,10 +65,11 @@ data class TileStorageStats(
 )
 
 /**
- * Persistent, automatic tile-by-tile offline storage manager.
+ * Production-ready, durable tile-by-tile offline storage manager.
  * Stores individually viewed map tiles and associated geographic data under persistent
- * internal app storage (retained across app restarts and cache evictions).
- * Enforces independent availability across data categories and in-flight request deduplication.
+ * internal app storage (retained across app restarts, force-stops, and cache evictions).
+ * Enforces atomic file writes, CRC32 checksums, Room metadata synchronization,
+ * MapLibre C++ OfflineManager resource injection, and in-flight request deduplication.
  */
 class TileStorageManager(private val context: Context) {
 
@@ -74,83 +77,43 @@ class TileStorageManager(private val context: Context) {
         if (!exists()) mkdirs()
     }
 
-    // In-flight request lock map to prevent redundant concurrent fetches for the same tile
+    private val db = AppDatabase.getInstance(context)
+    private val tileDao = db.retainedTileDao()
+
+    // In-flight request locks: "provider:category:z/x/y" -> timestamp
     private val inFlightLocks = ConcurrentHashMap<String, Long>()
 
-    // In-memory coverage index mapping "category:z/x/y" -> TileMetadata
-    private val coverageIndex = ConcurrentHashMap<String, TileMetadata>()
+    // Fast memory cache of confirmed retained tiles: "provider:category:z/x/y" -> Boolean
+    private val memoryCoverageCache = ConcurrentHashMap<String, Boolean>()
 
-    init {
-        // Scan pre-existing retained tiles on disk into coverage index
-        scanExistingTiles()
+    fun buildTileKey(providerId: String, category: TileCategory, z: Int, x: Int, y: Int): String {
+        return "$providerId:${category.name}:$z/$x/$y"
     }
 
-    private fun scanExistingTiles() {
-        try {
-            var count = 0
-            TileCategory.values().forEach { cat ->
-                val catDir = File(baseStorageDir, cat.dirName)
-                if (catDir.exists() && catDir.isDirectory) {
-                    catDir.walkTopDown().filter { it.isFile && it.extension == "bin" }.forEach { file ->
-                        val parts = file.parentFile?.parentFile?.name to file.nameWithoutExtension
-                        // e.g. path format: category/z/x/y.bin
-                        val pathParts = file.relativeTo(baseStorageDir).path.split(File.separator)
-                        if (pathParts.size == 4) {
-                            val z = pathParts[1].toIntOrNull()
-                            val x = pathParts[2].toIntOrNull()
-                            val y = pathParts[3].substringBeforeLast(".").toIntOrNull()
-                            if (z != null && x != null && y != null) {
-                                val key = buildTileKey(cat, z, x, y)
-                                coverageIndex[key] = TileMetadata(
-                                    providerId = "persisted_local",
-                                    schemaVersion = "1.0",
-                                    fetchTimestamp = file.lastModified(),
-                                    byteSize = file.length()
-                                )
-                                count++
-                            }
-                        }
-                    }
-                }
-            }
-            DiagnosticRepository.log(
-                severity = LogSeverity.INFO,
-                source = "TileStorageManager",
-                description = "Indexed $count persistent offline tiles from disk storage",
-                stage = "TILE_INDEX_READY"
-            )
-        } catch (e: Throwable) {
-            DiagnosticRepository.log(
-                severity = LogSeverity.WARNING,
-                source = "TileStorageManager",
-                description = "Error scanning existing tiles: ${e.message}"
-            )
-        }
+    fun isTileRetained(providerId: String, category: TileCategory, z: Int, x: Int, y: Int): Boolean {
+        val key = buildTileKey(providerId, category, z, x, y)
+        if (memoryCoverageCache[key] == true) return true
+        val file = getTileFile(providerId, category, z, x, y)
+        val exists = file.exists() && file.length() > 0
+        if (exists) memoryCoverageCache[key] = true
+        return exists
     }
 
-    fun buildTileKey(category: TileCategory, z: Int, x: Int, y: Int): String {
-        return "${category.name}:$z/$x/$y"
+    fun getTileFile(providerId: String, category: TileCategory, z: Int, x: Int, y: Int): File {
+        val providerDir = File(baseStorageDir, sanitizeDir(providerId))
+        val catDir = File(providerDir, category.dirName)
+        val zDir = File(catDir, z.toString())
+        val xDir = File(zDir, x.toString())
+        if (!xDir.exists()) xDir.mkdirs()
+        return File(xDir, "$y.bin")
     }
 
-    fun isTileRetained(category: TileCategory, z: Int, x: Int, y: Int): Boolean {
-        val key = buildTileKey(category, z, x, y)
-        if (coverageIndex.containsKey(key)) return true
-        val file = getTileFile(category, z, x, y)
-        return file.exists() && file.length() > 0
-    }
-
-    fun getTileFile(category: TileCategory, z: Int, x: Int, y: Int): File {
-        val zDir = File(File(File(baseStorageDir, category.dirName), z.toString()), x.toString())
-        if (!zDir.exists()) zDir.mkdirs()
-        return File(zDir, "$y.bin")
-    }
-
-    fun acquireLock(category: TileCategory, z: Int, x: Int, y: Int): Boolean {
-        val key = buildTileKey(category, z, x, y)
+    fun acquireLock(providerId: String, category: TileCategory, z: Int, x: Int, y: Int): Boolean {
+        val key = buildTileKey(providerId, category, z, x, y)
         val now = System.currentTimeMillis()
         val existing = inFlightLocks.putIfAbsent(key, now)
         if (existing == null) return true
-        // Stale lock timeout: 15 seconds
+        // 15-second stale lock expiration
         if (now - existing > 15_000L) {
             inFlightLocks[key] = now
             return true
@@ -158,60 +121,146 @@ class TileStorageManager(private val context: Context) {
         return false
     }
 
-    fun releaseLock(category: TileCategory, z: Int, x: Int, y: Int) {
-        val key = buildTileKey(category, z, x, y)
+    fun releaseLock(providerId: String, category: TileCategory, z: Int, x: Int, y: Int) {
+        val key = buildTileKey(providerId, category, z, x, y)
         inFlightLocks.remove(key)
     }
 
-    @Synchronized
-    fun saveTileData(
+    /**
+     * Atomically writes tile data to disk, calculates CRC32 checksum,
+     * updates Room database metadata, and registers the URL with MapLibre's native OfflineManager.
+     */
+    suspend fun saveTileData(
+        providerId: String,
         category: TileCategory,
         z: Int,
         x: Int,
         y: Int,
         data: ByteArray,
         metadata: TileMetadata
-    ): Boolean {
-        return try {
-            val file = getTileFile(category, z, x, y)
-            FileOutputStream(file).use { it.write(data) }
-            val key = buildTileKey(category, z, x, y)
-            coverageIndex[key] = metadata.copy(byteSize = data.size.toLong())
-            releaseLock(category, z, x, y)
+    ): Boolean = withContext(Dispatchers.IO) {
+        val targetFile = getTileFile(providerId, category, z, x, y)
+        val tempFile = File(targetFile.parentFile, "${targetFile.name}.tmp")
+        try {
+            // Compute CRC32
+            val crc = CRC32()
+            crc.update(data)
+            val checksum = crc.value.toString(16)
+
+            // Atomic file write
+            FileOutputStream(tempFile).use { fos ->
+                fos.write(data)
+                fos.flush()
+            }
+            if (targetFile.exists()) targetFile.delete()
+            val renamed = tempFile.renameTo(targetFile)
+            if (!renamed) {
+                tempFile.copyTo(targetFile, overwrite = true)
+                tempFile.delete()
+            }
+
+            // Sync with Room Database
+            val entity = RetainedTileEntity(
+                providerId = providerId,
+                category = category.name,
+                z = z,
+                x = x,
+                y = y,
+                filePath = targetFile.absolutePath,
+                byteSize = data.size.toLong(),
+                checksum = checksum,
+                fetchTimestamp = metadata.fetchTimestamp,
+                etag = metadata.etag,
+                sourceUrl = metadata.sourceUrl,
+                attribution = metadata.attribution,
+                retentionPermission = metadata.retentionPermission,
+                integrityStatus = "VALID"
+            )
+            tileDao.insertTile(entity)
+
+            // Sync with MapLibre Native Offline C++ Resource Cache
+            if (metadata.sourceUrl.isNotEmpty() && (category == TileCategory.OSM_VECTOR || category == TileCategory.SATELLITE_RASTER)) {
+                try {
+                    OfflineManager.getInstance(context).putResourceWithUrl(
+                        metadata.sourceUrl,
+                        data,
+                        metadata.fetchTimestamp,
+                        0L, // no expiration
+                        metadata.etag,
+                        false // mustRevalidate = false for offline playback
+                    )
+                } catch (e: Throwable) {
+                    DiagnosticRepository.log(
+                        severity = LogSeverity.DEBUG,
+                        source = "TileStorageManager",
+                        description = "MapLibre putResourceWithUrl non-fatal note: ${e.message}"
+                    )
+                }
+            }
+
+            val key = buildTileKey(providerId, category, z, x, y)
+            memoryCoverageCache[key] = true
             true
         } catch (e: Throwable) {
             DiagnosticRepository.log(
                 severity = LogSeverity.WARNING,
                 source = "TileStorageManager",
-                description = "Failed to save tile $category $z/$x/$y: ${e.message}"
+                description = "Failed saving tile $providerId $category $z/$x/$y: ${e.message}"
             )
             false
+        } finally {
+            if (tempFile.exists()) tempFile.delete()
+            releaseLock(providerId, category, z, x, y)
         }
     }
 
-    fun loadTileData(category: TileCategory, z: Int, x: Int, y: Int): ByteArray? {
-        val file = getTileFile(category, z, x, y)
-        return if (file.exists() && file.length() > 0) {
-            try {
-                file.readBytes()
-            } catch (e: Throwable) {
-                null
+    suspend fun loadTileData(
+        providerId: String,
+        category: TileCategory,
+        z: Int,
+        x: Int,
+        y: Int
+    ): ByteArray? = withContext(Dispatchers.IO) {
+        val file = getTileFile(providerId, category, z, x, y)
+        if (!file.exists() || file.length() == 0L) return@withContext null
+
+        try {
+            val bytes = file.readBytes()
+            // Verify integrity against Room checksum if available
+            val record = tileDao.getTile(providerId, category.name, z, x, y)
+            if (record != null && record.checksum.isNotEmpty()) {
+                val crc = CRC32()
+                crc.update(bytes)
+                val currentChecksum = crc.value.toString(16)
+                if (currentChecksum != record.checksum) {
+                    DiagnosticRepository.log(
+                        severity = LogSeverity.ERROR,
+                        source = "TileStorageManager",
+                        description = "Corrupted tile detected: $providerId $category $z/$x/$y. Recovering by purge."
+                    )
+                    file.delete()
+                    tileDao.deleteTile(providerId, category.name, z, x, y)
+                    memoryCoverageCache.remove(buildTileKey(providerId, category, z, x, y))
+                    return@withContext null
+                }
             }
-        } else {
+            bytes
+        } catch (e: Throwable) {
             null
         }
     }
 
-    fun getStorageStats(): TileStorageStats {
+    suspend fun getStorageStats(): TileStorageStats = withContext(Dispatchers.IO) {
+        val count = tileDao.getTileCount()
+        val bytes = tileDao.getTotalBytes() ?: 0L
         val breakdown = mutableMapOf<TileCategory, Int>()
         TileCategory.values().forEach { cat ->
-            breakdown[cat] = coverageIndex.keys.count { it.startsWith(cat.name) }
+            breakdown[cat] = tileDao.getTileCountByCategory(cat.name)
         }
-        val totalBytes = coverageIndex.values.sumOf { it.byteSize }
-        return TileStorageStats(
-            totalTiles = coverageIndex.size,
-            totalBytes = totalBytes,
-            categoryBreakdown = breakdown
-        )
+        TileStorageStats(count, bytes, breakdown)
+    }
+
+    private fun sanitizeDir(name: String): String {
+        return name.replace(Regex("[^a-zA-Z0-9._-]"), "_")
     }
 }

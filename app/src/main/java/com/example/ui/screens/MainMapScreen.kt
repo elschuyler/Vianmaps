@@ -386,6 +386,7 @@ fun MainMapScreen(
                     try {
                         context.unregisterComponentCallbacks(memoryCallbacks)
                     } catch (_: Throwable) {}
+                    controller.visibleTileCoordinator.stop()
                     safeDestroy("COMPOSE_DISPOSAL")
                 }
             }
