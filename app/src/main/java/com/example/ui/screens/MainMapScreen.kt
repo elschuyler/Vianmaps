@@ -64,11 +64,11 @@ fun MainMapScreen(
     val snackbarHostState = remember { SnackbarHostState() }
 
     // Handle back button for modals:
-    // Back from Log Keeper returns to Settings; Back from Settings returns to Map
-    BackHandler(enabled = uiState.activeModal != null || uiState.quickSettingsOpen) {
+    // Back from Log Keeper, More Settings, Backup & Restore returns directly to Map
+    // Back while compact popup is open dismisses the popup
+    BackHandler(enabled = uiState.activeModal != null || uiState.settingsPopupOpen) {
         when {
-            uiState.quickSettingsOpen -> viewModel.closeQuickSettings()
-            uiState.activeModal is ActiveModal.LogKeeper -> viewModel.openModal(ActiveModal.Settings)
+            uiState.settingsPopupOpen -> viewModel.closeSettingsPopup()
             else -> viewModel.closeModal()
         }
     }
@@ -428,7 +428,7 @@ fun MainMapScreen(
                 modifier = Modifier
                     .align(Alignment.TopStart)
                     .statusBarsPadding()
-                    .padding(start = 12.dp, top = 8.dp),
+                    .padding(start = 12.dp, top = 8.dp, end = 58.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 // Top coordinate box (foldable on tap with details & Sensor Panel button)
@@ -507,8 +507,8 @@ fun MainMapScreen(
             // Compact Floating Bottom Navigation Bar (Anchored to Bottom-Left per Reference Screenshot)
             BottomNavigationBar(
                 isNorthLocked = uiState.camera.isNorthLocked,
-                onSettingsClick = { viewModel.openModal(ActiveModal.Settings) },
-                onSettingsLongClick = { viewModel.openQuickSettings() },
+                onSettingsClick = { viewModel.openSettingsPopup() },
+                onSettingsLongClick = { viewModel.openModal(ActiveModal.MoreSettings) },
                 onMapsClick = { viewModel.openModal(ActiveModal.MapsPopup) },
                 onPlacesClick = { viewModel.openModal(ActiveModal.PlacesPopup) },
                 onPlacesLongClick = { viewModel.openModal(ActiveModal.MemoryPalaceWorkspace) },
@@ -525,7 +525,7 @@ fun MainMapScreen(
             // Floating Popups & Modals (All unified in crisp White & Sky Blue)
             AppModalManager(
                 activeModal = uiState.activeModal,
-                quickSettingsOpen = uiState.quickSettingsOpen,
+                settingsPopupOpen = uiState.settingsPopupOpen,
                 currentStyle = uiState.currentStyle,
                 uiState = uiState,
                 isDeviceOnline = isDeviceOnline,
@@ -537,7 +537,9 @@ fun MainMapScreen(
                     }
                 },
                 onDismissModal = { viewModel.closeModal() },
-                onDismissQuickSettings = { viewModel.closeQuickSettings() },
+                onDismissSettingsPopup = { viewModel.closeSettingsPopup() },
+                onOpenMoreSettings = { viewModel.openModal(ActiveModal.MoreSettings) },
+                onOpenBackupRestore = { viewModel.openModal(ActiveModal.BackupRestore) },
                 onOpenTool = { name, desc ->
                     viewModel.openModal(ActiveModal.PlaceholderTool(name, desc))
                 },
@@ -546,9 +548,6 @@ fun MainMapScreen(
                 },
                 onOpenLogKeeper = {
                     viewModel.openModal(ActiveModal.LogKeeper)
-                },
-                onBackToSettings = {
-                    viewModel.openModal(ActiveModal.Settings)
                 }
             )
         }

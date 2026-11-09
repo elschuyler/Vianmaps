@@ -32,11 +32,12 @@ data class MapUiState(
     val mapLoadingStage: String = "INITIALIZING",
     val lastMapError: String? = null,
     val activeModal: ActiveModal? = null,
-    val quickSettingsOpen: Boolean = false
+    val settingsPopupOpen: Boolean = false
 )
 
 sealed interface ActiveModal {
-    data object Settings : ActiveModal
+    data object MoreSettings : ActiveModal
+    data object BackupRestore : ActiveModal
     data object LogKeeper : ActiveModal
     data object MapsPopup : ActiveModal
     data object PlacesPopup : ActiveModal
@@ -237,19 +238,19 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun openModal(modal: ActiveModal) {
-        _uiState.value = _uiState.value.copy(activeModal = modal, quickSettingsOpen = false)
+        _uiState.value = _uiState.value.copy(activeModal = modal, settingsPopupOpen = false)
     }
 
     fun closeModal() {
-        _uiState.value = _uiState.value.copy(activeModal = null, quickSettingsOpen = false)
+        _uiState.value = _uiState.value.copy(activeModal = null, settingsPopupOpen = false)
     }
 
-    fun openQuickSettings() {
-        _uiState.value = _uiState.value.copy(quickSettingsOpen = true)
+    fun openSettingsPopup() {
+        _uiState.value = _uiState.value.copy(settingsPopupOpen = true, activeModal = null)
     }
 
-    fun closeQuickSettings() {
-        _uiState.value = _uiState.value.copy(quickSettingsOpen = false)
+    fun closeSettingsPopup() {
+        _uiState.value = _uiState.value.copy(settingsPopupOpen = false)
     }
 
     override fun onCleared() {

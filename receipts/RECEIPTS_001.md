@@ -458,3 +458,6 @@
   - Verified debug APK build via `gradle assembleDebug` (BUILD SUCCESSFUL in 8s, output at `app/build/outputs/apk/debug/app-debug.apk`).
 * **Deviations from request**: None.
 * **Known issues / follow-up**: Physical on-device run to test visual satellite tiles over network and verify offline tile playback in airplane mode.
+
+---
+*Note: RECEIPTS_001.md closed at 465 lines to respect the mandatory 500-line file cap. All subsequent entries continue in receipts/RECEIPTS_002.md.*

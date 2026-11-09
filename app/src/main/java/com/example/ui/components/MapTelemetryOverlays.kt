@@ -154,38 +154,55 @@ fun MapCompassIndicator(
             .testTag("map_compass_indicator"),
         contentAlignment = Alignment.Center
     ) {
-        // Needle Canvas that rotates according to the camera bearing
+        // 4-Axis Cross Reticle Canvas that rotates according to the camera bearing
         Canvas(
             modifier = Modifier
                 .size(24.dp)
-                .rotate(-bearing.toFloat()) // Invert camera bearing so needle points to geographic/map North
+                .rotate(-bearing.toFloat()) // Invert camera bearing so cross points to geographic North
         ) {
             val centerX = size.width / 2f
             val centerY = size.height / 2f
-            val needleWidth = 5.dp.toPx()
-            val needleHalfLength = size.height / 2f - 2.dp.toPx()
+            val armLength = size.height / 2f - 2.dp.toPx()
+            val neutralArmLength = armLength * 0.72f
 
-            // North Pointer (Sky Blue)
-            val northPath = Path().apply {
-                moveTo(centerX, centerY - needleHalfLength) // North Tip
-                lineTo(centerX - needleWidth / 2f, centerY)
-                lineTo(centerX + needleWidth / 2f, centerY)
-                close()
-            }
-            drawPath(northPath, color = SkyBluePrimary)
+            // North Arm (Sky Blue primary arm - boldest and longest)
+            drawLine(
+                color = SkyBluePrimary,
+                start = Offset(centerX, centerY - 2.dp.toPx()),
+                end = Offset(centerX, centerY - armLength),
+                strokeWidth = 2.dp.toPx(),
+                cap = androidx.compose.ui.graphics.StrokeCap.Round
+            )
 
-            // South Pointer (Subtle slate)
-            val southPath = Path().apply {
-                moveTo(centerX, centerY + needleHalfLength) // South Tip
-                lineTo(centerX - needleWidth / 2f, centerY)
-                lineTo(centerX + needleWidth / 2f, centerY)
-                close()
-            }
-            drawPath(southPath, color = Color(0xFF94A3B8))
+            // South Arm (Subtle slate)
+            drawLine(
+                color = Color(0xFF94A3B8),
+                start = Offset(centerX, centerY + 2.dp.toPx()),
+                end = Offset(centerX, centerY + neutralArmLength),
+                strokeWidth = 1.2.dp.toPx(),
+                cap = androidx.compose.ui.graphics.StrokeCap.Round
+            )
 
-            // Center pivot circle
-            drawCircle(color = Color.White, radius = 2.dp.toPx(), center = Offset(centerX, centerY))
-            drawCircle(color = TextDarkPrimary, radius = 1.dp.toPx(), center = Offset(centerX, centerY))
+            // East Arm (Subtle slate)
+            drawLine(
+                color = Color(0xFF94A3B8),
+                start = Offset(centerX + 2.dp.toPx(), centerY),
+                end = Offset(centerX + neutralArmLength, centerY),
+                strokeWidth = 1.2.dp.toPx(),
+                cap = androidx.compose.ui.graphics.StrokeCap.Round
+            )
+
+            // West Arm (Subtle slate)
+            drawLine(
+                color = Color(0xFF94A3B8),
+                start = Offset(centerX - 2.dp.toPx(), centerY),
+                end = Offset(centerX - neutralArmLength, centerY),
+                strokeWidth = 1.2.dp.toPx(),
+                cap = androidx.compose.ui.graphics.StrokeCap.Round
+            )
+
+            // Center pivot reticle dot
+            drawCircle(color = TextDarkPrimary, radius = 1.5.dp.toPx(), center = Offset(centerX, centerY))
         }
     }
 }

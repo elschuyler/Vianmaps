@@ -27,10 +27,13 @@ import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.filled.CloudSync
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.PinDrop
 import androidx.compose.material.icons.filled.Route
-import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -78,38 +81,44 @@ import com.example.ui.screens.MapUiState
 @Composable
 fun AppModalManager(
     activeModal: ActiveModal?,
-    quickSettingsOpen: Boolean,
+    settingsPopupOpen: Boolean,
     currentStyle: MapStyleDefinition,
     uiState: MapUiState,
     isDeviceOnline: Boolean,
     connectionType: String,
     onSelectStyle: (MapStyleDefinition) -> Unit,
     onDismissModal: () -> Unit,
-    onDismissQuickSettings: () -> Unit,
+    onDismissSettingsPopup: () -> Unit,
+    onOpenMoreSettings: () -> Unit,
+    onOpenBackupRestore: () -> Unit,
     onOpenTool: (name: String, desc: String) -> Unit,
     onOpenMemoryPalace: () -> Unit,
-    onOpenLogKeeper: () -> Unit,
-    onBackToSettings: () -> Unit
+    onOpenLogKeeper: () -> Unit
 ) {
-    if (quickSettingsOpen) {
-        FloatingPopupDialog(onDismiss = onDismissQuickSettings) {
-            QuickSettingsContent(onClose = onDismissQuickSettings)
+    if (settingsPopupOpen) {
+        FloatingPopupDialog(onDismiss = onDismissSettingsPopup) {
+            SettingsPopupContent(
+                onOpenBackupRestore = onOpenBackupRestore,
+                onOpenLogKeeper = onOpenLogKeeper,
+                onOpenMoreSettings = onOpenMoreSettings,
+                onClose = onDismissSettingsPopup
+            )
         }
     }
 
     when (activeModal) {
-        is ActiveModal.Settings -> {
-            FullScreenModal(title = "Settings", onClose = onDismissModal) {
-                SettingsScreenContent(
-                    onOpenLogKeeper = {
-                        onDismissModal()
-                        onOpenLogKeeper()
-                    }
-                )
+        is ActiveModal.MoreSettings -> {
+            FullScreenModal(title = "More Settings", onClose = onDismissModal) {
+                MoreSettingsWorkspace()
+            }
+        }
+        is ActiveModal.BackupRestore -> {
+            FullScreenModal(title = "Backup & Restore", onClose = onDismissModal) {
+                BackupRestoreContent(onBack = onDismissModal)
             }
         }
         is ActiveModal.LogKeeper -> {
-            FullScreenModal(title = "Log Keeper", onClose = onBackToSettings) {
+            FullScreenModal(title = "Log Keeper", onClose = onDismissModal) {
                 LogKeeperScreenContent(
                     uiState = uiState,
                     isDeviceOnline = isDeviceOnline,
@@ -204,7 +213,7 @@ fun FloatingPopupDialog(
                     enabled = true,
                     onClick = { /* Consume clicks inside card to prevent dismiss */ }
                 )
-                .padding(14.dp)
+                .padding(10.dp)
         ) {
             content()
         }
@@ -259,7 +268,12 @@ fun FullScreenModal(
 }
 
 @Composable
-fun QuickSettingsContent(onClose: () -> Unit) {
+fun SettingsPopupContent(
+    onOpenBackupRestore: () -> Unit,
+    onOpenLogKeeper: () -> Unit,
+    onOpenMoreSettings: () -> Unit,
+    onClose: () -> Unit
+) {
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -267,57 +281,148 @@ fun QuickSettingsContent(onClose: () -> Unit) {
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = "Quick Settings",
+                text = "Settings",
                 fontSize = 15.sp,
                 fontWeight = FontWeight.Bold,
                 color = TextDarkPrimary
             )
             IconButton(onClick = onClose, modifier = Modifier.size(28.dp)) {
-                Icon(Icons.Default.Close, contentDescription = "Close", tint = TextDarkSecondary, modifier = Modifier.size(18.dp))
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = "Close Settings",
+                    tint = TextDarkSecondary,
+                    modifier = Modifier.size(18.dp)
+                )
             }
         }
+
         Spacer(modifier = Modifier.height(10.dp))
 
-        // Share Map Image action
+        // 1. Backup & Restore (Planned / Not yet available badge)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(12.dp))
                 .background(SurfaceOffWhite)
-                .clickable { /* Action */ }
-                .padding(10.dp),
+                .clickable {
+                    onClose()
+                    onOpenBackupRestore()
+                }
+                .padding(horizontal = 10.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Icon(Icons.Default.Share, contentDescription = null, tint = SkyBluePrimary, modifier = Modifier.size(20.dp))
+            Icon(
+                imageVector = Icons.Default.CloudSync,
+                contentDescription = "Backup & Restore",
+                tint = SkyBluePrimary,
+                modifier = Modifier.size(20.dp)
+            )
             Spacer(modifier = Modifier.width(10.dp))
-            Column {
+            Column(modifier = Modifier.weight(1f)) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        text = "Backup & Restore",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = TextDarkPrimary
+                    )
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(SkyBlueLight)
+                            .padding(horizontal = 5.dp, vertical = 1.dp)
+                    ) {
+                        Text(
+                            text = "Planned",
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = SkyBlueDim
+                        )
+                    }
+                }
                 Text(
-                    text = "Share Map Image (Visible Viewport)",
+                    text = "Local archive export & restore (Planned milestone)",
+                    fontSize = 10.sp,
+                    color = TextDarkSecondary
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(3.dp))
+
+        // 2. Log Keeper
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(SurfaceOffWhite)
+                .clickable {
+                    onClose()
+                    onOpenLogKeeper()
+                }
+                .padding(horizontal = 10.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Default.Terminal,
+                contentDescription = "Log Keeper",
+                tint = SkyBluePrimary,
+                modifier = Modifier.size(20.dp)
+            )
+            Spacer(modifier = Modifier.width(10.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Log Keeper",
                     fontSize = 13.sp,
-                    fontWeight = FontWeight.Medium,
+                    fontWeight = FontWeight.SemiBold,
                     color = TextDarkPrimary
                 )
                 Text(
-                    text = "[Pending MapLibre Viewport Surface Capture integration in Milestone 2]",
+                    text = "Live diagnostic events, system telemetry & export",
                     fontSize = 10.sp,
-                    color = SkyBlueDim
+                    color = TextDarkSecondary
                 )
             }
         }
 
-        Spacer(modifier = Modifier.height(6.dp))
+        Spacer(modifier = Modifier.height(3.dp))
+
+        // 3. More Settings
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(12.dp))
                 .background(SurfaceOffWhite)
-                .clickable { onClose() }
-                .padding(10.dp),
+                .clickable {
+                    onClose()
+                    onOpenMoreSettings()
+                }
+                .padding(horizontal = 10.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Icon(Icons.Default.Tune, contentDescription = null, tint = SkyBluePrimary, modifier = Modifier.size(20.dp))
+            Icon(
+                imageVector = Icons.Default.Tune,
+                contentDescription = "More Settings",
+                tint = SkyBluePrimary,
+                modifier = Modifier.size(20.dp)
+            )
             Spacer(modifier = Modifier.width(10.dp))
-            Text("Display & Gesture Calibration", fontSize = 13.sp, color = TextDarkPrimary)
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "More Settings",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = TextDarkPrimary
+                )
+                Text(
+                    text = "Preferences, display, units & boundaries",
+                    fontSize = 10.sp,
+                    color = TextDarkSecondary
+                )
+            }
         }
     }
 }
@@ -390,7 +495,7 @@ fun MapsPopupContent(
                                 shape = RoundedCornerShape(10.dp)
                             )
                             .clickable { onSelectStyle(style) }
-                            .padding(10.dp),
+                            .padding(horizontal = 10.dp, vertical = 5.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
@@ -410,7 +515,7 @@ fun MapsPopupContent(
                             Icon(Icons.Default.Check, contentDescription = "Selected", tint = SkyBluePrimary, modifier = Modifier.size(18.dp))
                         }
                     }
-                    Spacer(modifier = Modifier.height(4.dp))
+                    Spacer(modifier = Modifier.height(3.dp))
                 }
 
                 Spacer(modifier = Modifier.height(6.dp))
@@ -453,13 +558,13 @@ fun PlacesPopupContent(
                 Icon(Icons.Default.Close, contentDescription = "Close", tint = TextDarkSecondary, modifier = Modifier.size(18.dp))
             }
         }
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(4.dp))
 
         PlaceItemRow(title = "Placemarks", icon = Icons.Default.PinDrop, subtitle = "0 saved landmarks")
         PlaceItemRow(title = "Routes", icon = Icons.Default.Route, subtitle = "0 recorded trails")
         PlaceItemRow(title = "Notes", icon = Icons.Default.Description, subtitle = "Spatial map notes")
 
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(4.dp))
         Button(
             onClick = onOpenMemoryPalace,
             colors = ButtonDefaults.buttonColors(
@@ -483,7 +588,7 @@ private fun PlaceItemRow(title: String, icon: ImageVector, subtitle: String) {
             .fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
             .background(SurfaceOffWhite)
-            .padding(horizontal = 8.dp, vertical = 6.dp),
+            .padding(horizontal = 8.dp, vertical = 3.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Icon(icon, contentDescription = null, tint = SkyBluePrimary, modifier = Modifier.size(18.dp))
@@ -525,7 +630,7 @@ fun ToolsPopupContent(
 
         LazyColumn(
             modifier = Modifier.heightIn(max = 280.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp)
+            verticalArrangement = Arrangement.spacedBy(2.dp)
         ) {
             items(tools) { (name, desc) ->
                 Row(
@@ -534,7 +639,7 @@ fun ToolsPopupContent(
                         .clip(RoundedCornerShape(8.dp))
                         .background(SurfaceOffWhite)
                         .clickable { onSelectTool(name, desc) }
-                        .padding(horizontal = 10.dp, vertical = 7.dp),
+                        .padding(horizontal = 8.dp, vertical = 3.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Column {
@@ -548,50 +653,273 @@ fun ToolsPopupContent(
 }
 
 @Composable
-fun SettingsScreenContent(onOpenLogKeeper: () -> Unit = {}) {
-    Column {
-        Text("Application Settings", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = SkyBluePrimary)
+fun MoreSettingsWorkspace() {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+    ) {
+        Text(
+            text = "System & Engine Configuration",
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Bold,
+            color = SkyBluePrimary
+        )
         Spacer(modifier = Modifier.height(8.dp))
-        Text("MapLibre Native Android Engine: Version 13.7.1", fontSize = 12.sp, color = TextDarkPrimary)
-        Text("Rendering Mode: 2D Orthographic MapView", fontSize = 11.sp, color = TextDarkSecondary)
-        Text("Tile Cache Policy: Normal visible session cache (No bulk prefetching)", fontSize = 11.sp, color = TextDarkSecondary)
 
-        Spacer(modifier = Modifier.height(16.dp))
-        Text("System Diagnostics & Telemetry", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = SkyBluePrimary)
-        Spacer(modifier = Modifier.height(8.dp))
+        // 1. Map Display & Projection
+        SettingsSectionCard {
+            Text(
+                text = "Map Display & Projection",
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                color = TextDarkPrimary
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            SettingsInfoRow(label = "Native Engine", value = "MapLibre Native Android v13.7.1")
+            SettingsInfoRow(label = "Projection", value = "2D Orthographic MapView")
+            SettingsInfoRow(label = "Default Base Style", value = "OpenFreeMap Liberty Vector")
+            SettingsInfoRow(label = "Display Calibration", value = "Milestone 2 Foundation")
+        }
+
+        Spacer(modifier = Modifier.height(14.dp))
+
+        // 2. Units & Coordinates
+        SettingsSectionCard {
+            Text(
+                text = "Units & Coordinate Formats",
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                color = TextDarkPrimary
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            SettingsInfoRow(label = "Coordinate System", value = "DMS (Deg Min Sec) & DD")
+            SettingsInfoRow(label = "Scale Indicator", value = "Stepped Bracket & Ratio Ruler")
+            SettingsInfoRow(label = "Elevation Datum", value = "Meters Above Sea Level (MSL)")
+        }
+
+        Spacer(modifier = Modifier.height(14.dp))
+
+        // 3. Offline Storage & Visible Tiles
+        SettingsSectionCard {
+            Text(
+                text = "Offline Storage & Tile Retention",
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                color = TextDarkPrimary
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            SettingsInfoRow(label = "Retention Mode", value = "Tile-by-tile visible retention")
+            SettingsInfoRow(label = "Database Engine", value = "Room SQLite (Deduplicated)")
+            SettingsInfoRow(label = "Routing Hierarchy", value = "Valhalla 3-level graph coverage")
+            SettingsInfoRow(label = "Ambient Disk Cache", value = "500 MB quota (No bulk packs)")
+        }
+
+        Spacer(modifier = Modifier.height(14.dp))
+
+        // 4. Network Policy & Device Privacy
+        SettingsSectionCard {
+            Text(
+                text = "Network Policy & Device Privacy",
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                color = TextDarkPrimary
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            SettingsInfoRow(label = "In-App Internet", value = "Hardware & Software Gate Controlled")
+            SettingsInfoRow(label = "Telemetry / Analytics", value = "Strict Zero (No remote servers)")
+            SettingsInfoRow(label = "Cloud Sync", value = "Disabled (Local persistence only)")
+            SettingsInfoRow(label = "Location Access", value = "Runtime only (Standby when idle)")
+        }
+
+        Spacer(modifier = Modifier.height(14.dp))
+
+        // 5. About & Attribution
+        SettingsSectionCard {
+            Text(
+                text = "About Vian Maps",
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                color = TextDarkPrimary
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            SettingsInfoRow(label = "Application", value = "Vian Maps Android")
+            SettingsInfoRow(label = "MapLibre Native", value = "v13.7.1 (ARM64-v8a / x86_64)")
+            SettingsInfoRow(label = "Map Vector Data", value = "© OpenStreetMap contributors")
+            SettingsInfoRow(label = "Tile Hosting", value = "OpenFreeMap")
+        }
+
+        Spacer(modifier = Modifier.height(20.dp))
+    }
+}
+
+@Composable
+fun BackupRestoreContent(onBack: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+    ) {
+        // Status header card
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(12.dp))
-                .background(SurfaceOffWhite)
+                .background(SkyBlueLight)
                 .border(1.dp, SkyBlueBorder, RoundedCornerShape(12.dp))
-                .clickable { onOpenLogKeeper() }
-                .padding(12.dp),
+                .padding(14.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Icon(Icons.Default.Terminal, contentDescription = "Log Keeper", tint = SkyBluePrimary, modifier = Modifier.size(24.dp))
+            Icon(
+                imageVector = Icons.Default.Info,
+                contentDescription = null,
+                tint = SkyBlueDim,
+                modifier = Modifier.size(24.dp)
+            )
             Spacer(modifier = Modifier.width(12.dp))
-            Column(modifier = Modifier.weight(1f)) {
+            Column {
                 Text(
-                    text = "Open Log Keeper Workspace",
+                    text = "Feature Scheduled: Future Milestone",
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Bold,
-                    color = TextDarkPrimary
+                    color = SkyBlueDim
                 )
                 Text(
-                    text = "Live diagnostic ring buffer, MapLibre SDK events, filtered search & export",
-                    fontSize = 10.sp,
+                    text = "Backup & Restore is intentionally not yet available.",
+                    fontSize = 11.sp,
                     color = TextDarkSecondary
                 )
             }
         }
 
         Spacer(modifier = Modifier.height(16.dp))
-        Text("Data & Privacy Boundaries", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = SkyBluePrimary)
+
+        Text(
+            text = "Planned Architectural Implementation",
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Bold,
+            color = TextDarkPrimary
+        )
         Spacer(modifier = Modifier.height(8.dp))
-        Text("• No cloud accounts, server sync, or external tracking", fontSize = 11.sp, color = TextDarkSecondary)
-        Text("• Location is accessed ONLY when explicitly enabled by user", fontSize = 11.sp, color = TextDarkSecondary)
-        Text("• User records isolated into managed storage boundary", fontSize = 11.sp, color = TextDarkSecondary)
+
+        SettingsSectionCard {
+            Text(
+                text = "Vian Maps strictly adheres to a local-first, zero-cloud architecture. When this milestone is implemented:",
+                fontSize = 12.sp,
+                color = TextDarkPrimary,
+                lineHeight = 17.sp
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            BulletPointText(
+                title = "Encrypted Local File Archive",
+                description = "User-authored content (Memory Palace spatial notes, saved waypoints, and custom routes) will be exportable to a single encrypted file on device storage."
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            BulletPointText(
+                title = "Offline Package Restoration",
+                description = "Restoring an archive will verify checksums and rebuild the local Room database indices without external network requests."
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            BulletPointText(
+                title = "Zero Remote Server Dependency",
+                description = "No mandatory user accounts, cloud syncing services, or third-party storage providers will ever be required."
+            )
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        Text(
+            text = "Current State Verification",
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Bold,
+            color = TextDarkPrimary
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+
+        SettingsSectionCard {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Default.Check,
+                    contentDescription = null,
+                    tint = SkyBluePrimary,
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "No simulated or mock restore operations are active.",
+                    fontSize = 11.sp,
+                    color = TextDarkSecondary
+                )
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Default.Check,
+                    contentDescription = null,
+                    tint = SkyBluePrimary,
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "All live data remains safely contained in local Room storage.",
+                    fontSize = 11.sp,
+                    color = TextDarkSecondary
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        Button(
+            onClick = onBack,
+            colors = ButtonDefaults.buttonColors(
+                containerColor = SkyBluePrimary,
+                contentColor = Color.White
+            ),
+            shape = RoundedCornerShape(12.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("Return to Map", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+        }
+    }
+}
+
+@Composable
+private fun SettingsSectionCard(content: @Composable ColumnScope.() -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(SurfaceOffWhite)
+            .border(1.dp, SurfaceBorderLight, RoundedCornerShape(12.dp))
+            .padding(12.dp)
+    ) {
+        content()
+    }
+}
+
+@Composable
+private fun SettingsInfoRow(label: String, value: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 3.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(text = label, fontSize = 12.sp, color = TextDarkSecondary)
+        Text(text = value, fontSize = 12.sp, fontWeight = FontWeight.Medium, color = TextDarkPrimary)
+    }
+}
+
+@Composable
+private fun BulletPointText(title: String, description: String) {
+    Row(modifier = Modifier.fillMaxWidth()) {
+        Text("• ", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = SkyBluePrimary)
+        Column {
+            Text(text = title, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = TextDarkPrimary)
+            Text(text = description, fontSize = 11.sp, color = TextDarkSecondary, lineHeight = 15.sp)
+        }
     }
 }
 

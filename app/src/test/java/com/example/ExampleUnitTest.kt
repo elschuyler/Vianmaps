@@ -18,6 +18,9 @@ import com.example.map.acquisition.VisibleTileCoordinator
 import com.example.map.source.MapSourceRepository
 import com.example.network.AppNetworkPolicy
 import kotlinx.coroutines.runBlocking
+import android.app.Application
+import com.example.ui.screens.ActiveModal
+import com.example.ui.screens.MapViewModel
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -30,15 +33,18 @@ import org.maplibre.android.geometry.LatLng
 import org.maplibre.android.geometry.LatLngBounds
 import org.maplibre.android.geometry.VisibleRegion
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 import java.io.File
 
 /**
- * Complete Local JVM Unit Test Suite for Vian Maps Phase 3.1.
+ * Complete Local JVM Unit Test Suite for Vian Maps Phase 3.1 & 3.2.
  * Tests XYZ conversion, visible tile enumeration, antimeridian crossing,
  * cache keys, atomic save/load, Room persistence, POI search after reopen,
- * feature deduplication, Valhalla official tile calculations, and network policy.
+ * feature deduplication, Valhalla official tile calculations, network policy,
+ * and Settings popup / More Settings / Backup & Restore transitions.
  */
 @RunWith(RobolectricTestRunner::class)
+@Config(sdk = [36])
 class ExampleUnitTest {
 
     private lateinit var context: Context
@@ -295,5 +301,76 @@ class ExampleUnitTest {
         // Center of tile 12/2397/1547 should be in Turkey near Ankara/Central Anatolia (~39° N, ~30-31° E)
         assertTrue(lat in 38.0..42.0)
         assertTrue(lng in 29.0..33.0)
+    }
+
+    @Test
+    fun test14_verifySettingsPopupAndModalTransitions() {
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        val viewModel = MapViewModel(app)
+
+        // 1. Initial State: popup is closed, activeModal is null
+        assertFalse(viewModel.uiState.value.settingsPopupOpen)
+        assertNull(viewModel.uiState.value.activeModal)
+
+        // 2. Short tap opens compact Settings popup
+        viewModel.openSettingsPopup()
+        assertTrue(viewModel.uiState.value.settingsPopupOpen)
+        assertNull(viewModel.uiState.value.activeModal)
+
+        // 3. Tapping More Settings from popup dismisses popup and opens MoreSettings workspace
+        viewModel.openModal(ActiveModal.MoreSettings)
+        assertFalse(viewModel.uiState.value.settingsPopupOpen)
+        assertEquals(ActiveModal.MoreSettings, viewModel.uiState.value.activeModal)
+
+        // 4. Back from More Settings returns directly to map
+        viewModel.closeModal()
+        assertFalse(viewModel.uiState.value.settingsPopupOpen)
+        assertNull(viewModel.uiState.value.activeModal)
+
+        // 5. Short tap opens popup again
+        viewModel.openSettingsPopup()
+        assertTrue(viewModel.uiState.value.settingsPopupOpen)
+
+        // 6. Tapping Backup & Restore opens BackupRestore workspace and closes popup
+        viewModel.openModal(ActiveModal.BackupRestore)
+        assertFalse(viewModel.uiState.value.settingsPopupOpen)
+        assertEquals(ActiveModal.BackupRestore, viewModel.uiState.value.activeModal)
+
+        // 7. Back from Backup & Restore returns directly to map
+        viewModel.closeModal()
+        assertNull(viewModel.uiState.value.activeModal)
+
+        // 8. Tapping Log Keeper opens LogKeeper workspace and closes popup
+        viewModel.openSettingsPopup()
+        viewModel.openModal(ActiveModal.LogKeeper)
+        assertFalse(viewModel.uiState.value.settingsPopupOpen)
+        assertEquals(ActiveModal.LogKeeper, viewModel.uiState.value.activeModal)
+
+        // 9. Back from Log Keeper returns directly to map (not back to Settings)
+        viewModel.closeModal()
+        assertNull(viewModel.uiState.value.activeModal)
+        assertFalse(viewModel.uiState.value.settingsPopupOpen)
+    }
+
+    @Test
+    fun test15_verifyDirectLongPressToMoreSettings() {
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        val viewModel = MapViewModel(app)
+
+        // Direct long-press bypasses the popup completely
+        viewModel.openModal(ActiveModal.MoreSettings)
+        assertFalse(viewModel.uiState.value.settingsPopupOpen)
+        assertEquals(ActiveModal.MoreSettings, viewModel.uiState.value.activeModal)
+
+        // Closing returns to map
+        viewModel.closeModal()
+        assertNull(viewModel.uiState.value.activeModal)
+
+        // Long-press while popup is open dismisses popup and directly enters MoreSettings
+        viewModel.openSettingsPopup()
+        assertTrue(viewModel.uiState.value.settingsPopupOpen)
+        viewModel.openModal(ActiveModal.MoreSettings)
+        assertFalse(viewModel.uiState.value.settingsPopupOpen)
+        assertEquals(ActiveModal.MoreSettings, viewModel.uiState.value.activeModal)
     }
 }

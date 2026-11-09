@@ -35,7 +35,7 @@ import com.example.ui.theme.SkyBluePrimary
 /**
  * Compact Floating Bottom Navigation Bar:
  * Restored to the 4 original Milestone 1 buttons:
- * 1. Tune / Settings: Tap -> Settings, Long-press -> Quick Settings popover
+ * 1. Tune / Settings: Tap -> Settings popup (3 entries), Long-press -> More Settings workspace directly
  * 2. Map: Tap -> Maps & Layers popover
  * 3. PinDrop / Places: Tap -> Places popover, Long-press -> Memory Palace workspace
  * 4. Compass / Tools: Tap -> Toggle North Lock, Long-press -> Tools popover
@@ -74,7 +74,7 @@ fun BottomNavigationBar(
             horizontalArrangement = Arrangement.spacedBy(2.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // 1. Settings / Tune (Tap -> Settings, Long-press -> Quick Settings)
+            // 1. Settings / Tune (Tap -> Settings Popup, Long-press -> More Settings Workspace)
             BottomBarIconButton(
                 icon = Icons.Default.Tune,
                 contentDescription = "Settings & Preferences",

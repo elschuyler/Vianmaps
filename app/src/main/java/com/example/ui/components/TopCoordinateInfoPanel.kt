@@ -73,7 +73,7 @@ fun formatDms(latitude: Double, longitude: Double): String {
 
     return String.format(
         Locale.US,
-        "%d°%02d'%05.2f\" %s %d°%02d'%05.2f\" %s",
+        "%d°%02d'%04.1f\"%s  %d°%02d'%04.1f\"%s",
         latDeg, latMin, latSec, latHemisphere,
         lngDeg, lngMin, lngSec, lngHemisphere
     )
@@ -119,20 +119,20 @@ fun TopCoordinateInfoPanel(
             .background(SurfaceWhite)
             .border(1.dp, SurfaceBorderLight, cardShape)
             .clickable { onToggleCollapse() }
-            .padding(horizontal = 10.dp, vertical = 6.dp)
+            .padding(horizontal = 6.dp, vertical = 3.dp)
             .testTag("top_coordinate_panel")
     ) {
         Column {
             // Primary Header Row: DMS Coordinates + chevron indicator
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 Text(
                     text = formatDms(cameraState.latitude, cameraState.longitude),
                     fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.Bold,
-                    fontSize = 13.sp,
+                    fontSize = 11.5.sp,
                     color = TextDarkPrimary,
                     maxLines = 1
                 )
@@ -140,7 +140,7 @@ fun TopCoordinateInfoPanel(
                     imageVector = if (isCollapsed) Icons.Default.ExpandMore else Icons.Default.ExpandLess,
                     contentDescription = if (isCollapsed) "Expand Details" else "Collapse Details",
                     tint = TextDarkSecondary,
-                    modifier = Modifier.size(16.dp)
+                    modifier = Modifier.size(14.dp)
                 )
             }
 
