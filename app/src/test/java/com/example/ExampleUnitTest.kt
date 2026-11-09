@@ -373,4 +373,117 @@ class ExampleUnitTest {
         assertFalse(viewModel.uiState.value.settingsPopupOpen)
         assertEquals(ActiveModal.MoreSettings, viewModel.uiState.value.activeModal)
     }
+
+    @Test
+    fun test16_verifyMapCompositionSerializationAndDefaults() {
+        val starters = com.example.map.composition.MapCompositionDefaults.starterCompositions
+        assertTrue(starters.isNotEmpty())
+        val defaultComp = com.example.map.composition.MapCompositionDefaults.defaultComposition
+        assertEquals("comp_satellite_hybrid", defaultComp.id)
+        assertTrue(defaultComp.isPinnedToQuickChoice)
+
+        // Test JSON roundtrip
+        val json = defaultComp.toJson()
+        val parsed = com.example.map.composition.MapComposition.fromJson(json)
+        assertEquals(defaultComp.id, parsed.id)
+        assertEquals(defaultComp.name, parsed.name)
+        assertEquals(defaultComp.baseStyleId, parsed.baseStyleId)
+        assertEquals(defaultComp.showRoads, parsed.showRoads)
+        assertEquals(defaultComp.showLabels, parsed.showLabels)
+        assertEquals(defaultComp.satelliteOpacity, parsed.satelliteOpacity, 0.001f)
+
+        // Test List JSON roundtrip
+        val listJson = com.example.map.composition.MapComposition.listToJsonString(starters)
+        val parsedList = com.example.map.composition.MapComposition.listFromJsonString(listJson)
+        assertEquals(starters.size, parsedList.size)
+    }
+
+    @Test
+    fun test17_verifyMapCatalogueModalBackStack() {
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        val viewModel = MapViewModel(app)
+
+        // 1. Open More Settings
+        viewModel.openModal(ActiveModal.MoreSettings)
+        assertEquals(ActiveModal.MoreSettings, viewModel.uiState.value.activeModal)
+
+        // 2. Navigate from More Settings into Map Catalogue subpage
+        viewModel.openModal(ActiveModal.MapCatalogue)
+        assertEquals(ActiveModal.MapCatalogue, viewModel.uiState.value.activeModal)
+
+        // 3. Back from Map Catalogue returns to More Settings
+        viewModel.openModal(ActiveModal.MoreSettings)
+        assertEquals(ActiveModal.MoreSettings, viewModel.uiState.value.activeModal)
+
+        // 4. Back from More Settings returns directly to Map
+        viewModel.closeModal()
+        assertNull(viewModel.uiState.value.activeModal)
+    }
+
+    @Test
+    fun test18_verifyMapCompositionSwitchAndPinToggle() {
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        val viewModel = MapViewModel(app)
+
+        val starters = viewModel.uiState.value.savedCompositions
+        val streetComp = starters.first { it.id == "comp_everyday_street" }
+
+        // Select street composition
+        viewModel.selectComposition(streetComp)
+        assertEquals("comp_everyday_street", viewModel.uiState.value.activeComposition.id)
+        assertEquals("openfreemap_liberty", viewModel.uiState.value.currentStyle.id)
+
+        // Duplicate composition
+        val countBefore = viewModel.uiState.value.savedCompositions.size
+        viewModel.duplicateComposition(streetComp)
+        val countAfter = viewModel.uiState.value.savedCompositions.size
+        assertEquals(countBefore + 1, countAfter)
+
+        // Pin toggle
+        val isPinnedBefore = streetComp.isPinnedToQuickChoice
+        viewModel.togglePinComposition(streetComp.id)
+        val updatedComp = viewModel.uiState.value.savedCompositions.first { it.id == streetComp.id }
+        assertEquals(!isPinnedBefore, updatedComp.isPinnedToQuickChoice)
+    }
+
+    @Test
+    fun test19_verifyStorageCalculationMetricsAndFormatting() = runBlocking {
+        // Formatting tests
+        assertEquals("0 B", com.example.data.storage.StorageCalculationManager.formatBytes(0L))
+        assertEquals("500 B", com.example.data.storage.StorageCalculationManager.formatBytes(500L))
+        assertEquals("1.0 KB", com.example.data.storage.StorageCalculationManager.formatBytes(1024L))
+        assertEquals("1.5 MB", com.example.data.storage.StorageCalculationManager.formatBytes((1.5 * 1024 * 1024).toLong()))
+
+        // Real storage calculation audit
+        val db = AppDatabase.getInstance(context)
+        val report = com.example.data.storage.StorageCalculationManager.calculateStorage(context, db)
+        assertNotNull(report)
+        assertTrue(report.perSource.isNotEmpty())
+        assertNotNull(report.featureStorage)
+        assertNotNull(report.routingStorage)
+    }
+
+    @Test
+    fun test20_verifySafePerProviderCacheClearing() = runBlocking {
+        val db = AppDatabase.getInstance(context)
+        val testTile = RetainedTileEntity(
+            providerId = "test_source_purge",
+            category = "TEST_CAT",
+            z = 10,
+            x = 100,
+            y = 200,
+            byteSize = 1024L,
+            checksum = "fake_checksum_abc123",
+            filePath = "/fake/path/tile.bin"
+        )
+        db.retainedTileDao().insertTiles(listOf(testTile))
+
+        val countBefore = db.retainedTileDao().getTileCountByProvider("test_source_purge")
+        assertEquals(1, countBefore)
+
+        com.example.data.storage.StorageCalculationManager.clearProviderTiles(context, db, "test_source_purge")
+
+        val countAfter = db.retainedTileDao().getTileCountByProvider("test_source_purge")
+        assertEquals(0, countAfter)
+    }
 }

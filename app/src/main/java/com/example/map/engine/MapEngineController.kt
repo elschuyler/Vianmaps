@@ -4,6 +4,7 @@ import android.content.Context
 import com.example.diagnostics.DiagnosticRepository
 import com.example.diagnostics.LogSeverity
 import com.example.map.acquisition.VisibleTileCoordinator
+import com.example.map.composition.MapComposition
 import com.example.map.source.MapStyleDefinition
 import org.maplibre.android.camera.CameraPosition
 import org.maplibre.android.camera.CameraUpdateFactory
@@ -33,6 +34,9 @@ class MapEngineController(
         private set
 
     var currentStyleDefinition: MapStyleDefinition? = null
+        private set
+
+    var currentComposition: MapComposition? = null
         private set
 
     var isNorthLocked: Boolean = false
@@ -129,6 +133,11 @@ class MapEngineController(
                 description = "Style loaded successfully (${styleDef.displayName}): $layerCount layers, $sourceCount sources",
                 stage = "STYLE_LOADED"
             )
+            // Apply overlay visibility if an active composition is set
+            currentComposition?.let { comp ->
+                applyCompositionOverlays(style, comp)
+            }
+
             onStatusChanged?.invoke(
                 MapEngineStatus.STYLE_READY,
                 "Style loaded: ${styleDef.displayName} ($layerCount layers)",
@@ -137,6 +146,92 @@ class MapEngineController(
 
             // Trigger initial visible tile acquisition
             visibleTileCoordinator.onCameraSettled(map, styleDef)
+        }
+    }
+
+    /**
+     * Applies a saved map composition. If the base style matches the currently loaded style,
+     * overlay layer visibilities and opacity are toggled instantly on the active style
+     * without triggering an expensive style reload.
+     */
+    fun applyComposition(
+        composition: MapComposition,
+        onStatusChanged: ((status: MapEngineStatus, stageDescription: String?, error: String?) -> Unit)? = null
+    ) {
+        this.currentComposition = composition
+        val map = maplibreMap ?: run {
+            onStatusChanged?.invoke(
+                MapEngineStatus.WAITING_FOR_MAP_VIEW,
+                "Map instance not attached yet",
+                null
+            )
+            return
+        }
+
+        val activeStyle = map.style
+        if (activeStyle != null && currentStyleDefinition?.id == composition.baseStyleId) {
+            applyCompositionOverlays(activeStyle, composition)
+            DiagnosticRepository.log(
+                severity = LogSeverity.INFO,
+                source = "MapEngineController",
+                description = "Applied composition '${composition.name}' overlay parameters directly to active style",
+                stage = "COMPOSITION_APPLIED"
+            )
+            onStatusChanged?.invoke(
+                MapEngineStatus.STYLE_READY,
+                "Applied composition: ${composition.name}",
+                null
+            )
+        } else {
+            loadStyle(composition.baseStyle, onStatusChanged)
+        }
+    }
+
+    private fun applyCompositionOverlays(style: Style, composition: MapComposition) {
+        try {
+            // Satellite raster opacity
+            style.getLayer("satellite-raster-layer")?.setProperties(
+                PropertyFactory.rasterOpacity(composition.satelliteOpacity)
+            )
+
+            for (layer in style.layers) {
+                val id = layer.id.lowercase()
+                when {
+                    id.contains("poi") -> {
+                        layer.setProperties(
+                            PropertyFactory.visibility(if (composition.showPois) Property.VISIBLE else Property.NONE)
+                        )
+                    }
+                    id.contains("label") || id.contains("place_") || id.contains("shield") -> {
+                        layer.setProperties(
+                            PropertyFactory.visibility(if (composition.showLabels) Property.VISIBLE else Property.NONE)
+                        )
+                    }
+                    id.contains("boundary") || id.contains("admin") -> {
+                        layer.setProperties(
+                            PropertyFactory.visibility(if (composition.showBoundaries) Property.VISIBLE else Property.NONE)
+                        )
+                    }
+                    id.contains("building") -> {
+                        layer.setProperties(
+                            PropertyFactory.visibility(if (composition.showBuildings) Property.VISIBLE else Property.NONE)
+                        )
+                    }
+                    id.contains("road") || id.contains("tunnel") || id.contains("bridge") ||
+                    id.contains("transportation") || id.contains("highway") || id.contains("motorway") ||
+                    id.contains("path") || id.contains("ferry") || id.contains("railway") -> {
+                        layer.setProperties(
+                            PropertyFactory.visibility(if (composition.showRoads) Property.VISIBLE else Property.NONE)
+                        )
+                    }
+                }
+            }
+        } catch (e: Throwable) {
+            DiagnosticRepository.log(
+                severity = LogSeverity.WARNING,
+                source = "MapEngineController",
+                description = "Failed to apply layer overlay visibility: ${e.message}"
+            )
         }
     }
 

@@ -64,11 +64,13 @@ fun MainMapScreen(
     val snackbarHostState = remember { SnackbarHostState() }
 
     // Handle back button for modals:
+    // Back from Map Catalogue returns to More Settings
     // Back from Log Keeper, More Settings, Backup & Restore returns directly to Map
     // Back while compact popup is open dismisses the popup
     BackHandler(enabled = uiState.activeModal != null || uiState.settingsPopupOpen) {
         when {
             uiState.settingsPopupOpen -> viewModel.closeSettingsPopup()
+            uiState.activeModal is ActiveModal.MapCatalogue -> viewModel.openModal(ActiveModal.MoreSettings)
             else -> viewModel.closeModal()
         }
     }
@@ -536,9 +538,32 @@ fun MainMapScreen(
                         viewModel.onMapStatusChanged(status, desc, err)
                     }
                 },
+                onSelectComposition = { comp ->
+                    viewModel.selectComposition(comp, controller)
+                },
+                onSaveComposition = { comp ->
+                    viewModel.saveComposition(comp, controller)
+                },
+                onDeleteComposition = { compId ->
+                    viewModel.deleteComposition(compId, controller)
+                },
+                onDuplicateComposition = { comp ->
+                    viewModel.duplicateComposition(comp)
+                },
+                onTogglePinComposition = { compId ->
+                    viewModel.togglePinComposition(compId)
+                },
+                onRefreshStorageReport = {
+                    viewModel.refreshStorageReport()
+                },
+                onClearProviderCache = { providerId ->
+                    viewModel.clearProviderCache(providerId)
+                },
                 onDismissModal = { viewModel.closeModal() },
                 onDismissSettingsPopup = { viewModel.closeSettingsPopup() },
                 onOpenMoreSettings = { viewModel.openModal(ActiveModal.MoreSettings) },
+                onOpenMapCatalogue = { viewModel.openModal(ActiveModal.MapCatalogue) },
+                onBackFromMapCatalogue = { viewModel.openModal(ActiveModal.MoreSettings) },
                 onOpenBackupRestore = { viewModel.openModal(ActiveModal.BackupRestore) },
                 onOpenTool = { name, desc ->
                     viewModel.openModal(ActiveModal.PlaceholderTool(name, desc))

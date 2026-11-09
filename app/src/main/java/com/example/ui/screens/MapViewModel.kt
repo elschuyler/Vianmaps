@@ -20,11 +20,21 @@ import kotlinx.coroutines.launch
 import com.example.map.engine.MapEngineController
 import com.example.map.engine.MapEngineStatus
 
+import com.example.data.db.AppDatabase
+import com.example.data.storage.OverallStorageReport
+import com.example.data.storage.StorageCalculationManager
+import com.example.map.composition.MapComposition
+import com.example.map.composition.MapCompositionDefaults
+
 data class MapUiState(
     val camera: MapCameraState = MapCameraState(),
     val isTopPanelCollapsed: Boolean = true,
     val isInternetEnabled: Boolean = true,
     val currentStyle: MapStyleDefinition = MapSourceRepository.defaultStyle,
+    val activeComposition: MapComposition = MapCompositionDefaults.defaultComposition,
+    val savedCompositions: List<MapComposition> = MapCompositionDefaults.starterCompositions,
+    val storageReport: OverallStorageReport? = null,
+    val isCalculatingStorage: Boolean = false,
     val isLocationActive: Boolean = false,
     val locationStatusText: String = "Location Off (Tap 2nd right control to request)",
     val isMapReady: Boolean = false,
@@ -37,6 +47,7 @@ data class MapUiState(
 
 sealed interface ActiveModal {
     data object MoreSettings : ActiveModal
+    data object MapCatalogue : ActiveModal
     data object BackupRestore : ActiveModal
     data object LogKeeper : ActiveModal
     data object MapsPopup : ActiveModal
@@ -63,7 +74,10 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
 
         viewModelScope.launch {
             val savedPrefs = preferencesRepository.userPreferencesFlow.first()
-            val style = MapSourceRepository.getStyleById(savedPrefs.selectedStyleId)
+            val compositions = MapComposition.listFromJsonString(savedPrefs.savedCompositionsJson)
+            val activeComp = compositions.find { it.id == savedPrefs.activeCompositionId }
+                ?: MapCompositionDefaults.defaultComposition
+            val style = activeComp.baseStyle
 
             AppNetworkPolicy.setInternetEnabled(savedPrefs.isInternetEnabled)
 
@@ -71,8 +85,13 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
                 camera = savedPrefs.cameraState,
                 isTopPanelCollapsed = savedPrefs.isTopPanelCollapsed,
                 isInternetEnabled = savedPrefs.isInternetEnabled,
-                currentStyle = style
+                currentStyle = style,
+                activeComposition = activeComp,
+                savedCompositions = compositions
             )
+
+            // Initial storage metrics calculation in background
+            refreshStorageReport()
         }
     }
 
@@ -234,6 +253,140 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
         )
         viewModelScope.launch {
             preferencesRepository.saveSelectedStyleId(style.id)
+        }
+    }
+
+    fun selectComposition(composition: MapComposition, controller: MapEngineController? = null) {
+        _uiState.value = _uiState.value.copy(
+            activeComposition = composition,
+            currentStyle = composition.baseStyle
+        )
+        DiagnosticRepository.log(
+            severity = LogSeverity.INFO,
+            source = "MapComposition",
+            description = "Selected composition: ${composition.name} (Base: ${composition.baseStyle.displayName})",
+            stage = "COMPOSITION_SWITCH"
+        )
+        viewModelScope.launch {
+            preferencesRepository.saveActiveCompositionId(composition.id)
+            preferencesRepository.saveSelectedStyleId(composition.baseStyleId)
+        }
+        controller?.applyComposition(composition) { status, desc, err ->
+            onMapStatusChanged(status, desc, err)
+        }
+    }
+
+    fun saveComposition(composition: MapComposition, controller: MapEngineController? = null) {
+        val currentList = _uiState.value.savedCompositions.toMutableList()
+        val index = currentList.indexOfFirst { it.id == composition.id }
+        if (index >= 0) {
+            currentList[index] = composition
+        } else {
+            currentList.add(composition)
+        }
+
+        val isActive = _uiState.value.activeComposition.id == composition.id
+        _uiState.value = _uiState.value.copy(
+            savedCompositions = currentList,
+            activeComposition = if (isActive) composition else _uiState.value.activeComposition
+        )
+
+        viewModelScope.launch {
+            val jsonString = MapComposition.listToJsonString(currentList)
+            preferencesRepository.saveSavedCompositionsJson(jsonString)
+        }
+
+        if (isActive && controller != null) {
+            controller.applyComposition(composition) { status, desc, err ->
+                onMapStatusChanged(status, desc, err)
+            }
+        }
+    }
+
+    fun deleteComposition(compositionId: String, controller: MapEngineController? = null) {
+        val currentList = _uiState.value.savedCompositions.filter { it.id != compositionId }
+        val updatedList = if (currentList.isEmpty()) MapCompositionDefaults.starterCompositions else currentList
+
+        var newActive = _uiState.value.activeComposition
+        if (newActive.id == compositionId) {
+            newActive = updatedList.firstOrNull() ?: MapCompositionDefaults.defaultComposition
+            selectComposition(newActive, controller)
+        }
+
+        _uiState.value = _uiState.value.copy(
+            savedCompositions = updatedList,
+            activeComposition = newActive
+        )
+
+        viewModelScope.launch {
+            val jsonString = MapComposition.listToJsonString(updatedList)
+            preferencesRepository.saveSavedCompositionsJson(jsonString)
+        }
+    }
+
+    fun duplicateComposition(composition: MapComposition) {
+        val newId = "comp_${System.currentTimeMillis()}"
+        val duplicate = composition.copy(
+            id = newId,
+            name = "${composition.name} Copy",
+            isStarter = false,
+            isPinnedToQuickChoice = true
+        )
+        val currentList = _uiState.value.savedCompositions + duplicate
+        _uiState.value = _uiState.value.copy(savedCompositions = currentList)
+
+        viewModelScope.launch {
+            val jsonString = MapComposition.listToJsonString(currentList)
+            preferencesRepository.saveSavedCompositionsJson(jsonString)
+        }
+    }
+
+    fun togglePinComposition(compositionId: String) {
+        val updatedList = _uiState.value.savedCompositions.map {
+            if (it.id == compositionId) it.copy(isPinnedToQuickChoice = !it.isPinnedToQuickChoice) else it
+        }
+        val updatedActive = if (_uiState.value.activeComposition.id == compositionId) {
+            _uiState.value.activeComposition.copy(isPinnedToQuickChoice = !_uiState.value.activeComposition.isPinnedToQuickChoice)
+        } else {
+            _uiState.value.activeComposition
+        }
+
+        _uiState.value = _uiState.value.copy(
+            savedCompositions = updatedList,
+            activeComposition = updatedActive
+        )
+
+        viewModelScope.launch {
+            val jsonString = MapComposition.listToJsonString(updatedList)
+            preferencesRepository.saveSavedCompositionsJson(jsonString)
+        }
+    }
+
+    fun refreshStorageReport() {
+        _uiState.value = _uiState.value.copy(isCalculatingStorage = true)
+        viewModelScope.launch {
+            try {
+                val db = AppDatabase.getInstance(getApplication())
+                val report = StorageCalculationManager.calculateStorage(getApplication(), db)
+                _uiState.value = _uiState.value.copy(
+                    storageReport = report,
+                    isCalculatingStorage = false
+                )
+            } catch (e: Throwable) {
+                _uiState.value = _uiState.value.copy(isCalculatingStorage = false)
+            }
+        }
+    }
+
+    fun clearProviderCache(providerId: String) {
+        viewModelScope.launch {
+            try {
+                val db = AppDatabase.getInstance(getApplication())
+                StorageCalculationManager.clearProviderTiles(getApplication(), db, providerId)
+                refreshStorageReport()
+            } catch (_: Throwable) {
+                refreshStorageReport()
+            }
         }
     }
 

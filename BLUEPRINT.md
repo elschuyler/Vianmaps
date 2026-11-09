@@ -53,6 +53,8 @@
 - [x] Phase 3.1: Complete Hybrid Map Composition, Live Visible-Tile Acquisition & Offline Room Pipeline (Delivered genuine MapLibre composite Hybrid style with satellite raster imagery beneath vector overlays and fill layer transparency adjustments; built Room Database with 6 entities/DAOs; built zero-dependency pure Kotlin MvtParser for vector tile decompression and geometry normalization; connected VisibleTileCoordinator to live viewport with debouncing, antimeridian handling, and OpenFreeMap TOS limits enforcement; integrated MapLibre C++ OfflineManager putResourceWithUrl; implemented official Valhalla tile hierarchy calculator and coverage reporting; passed all 13 unit tests and verified debug APK assembly).
 - [x] Phase 3.2: Implement Agreed Settings Entry & More Settings Workspace (Replaced obsolete Quick Settings with 3-entry Settings popup [Backup & Restore, Log Keeper, More Settings] anchored above bottom-left nav bar; implemented full-screen More Settings workspace with clean categorized foundation; implemented honest Backup & Restore milestone planned view; wired direct long-press on Tune to open More Settings; updated BackHandler so Log Keeper, More Settings, and Backup & Restore return directly to map; preserved MapView lifecycle intact; expanded unit tests to 15/15 passing).
 - [x] Phase 3.3: Top Panel Width Tightening, 4-Axis Crosshair Compass & Bottom Popup Vertical Spacing Refinement (Tightened DMS coordinate formatting and reduced top panel padding/font size with 58dp end margin constraint preventing compass collision; converted compass indicator to minimalist 4-axis cross reticle [Sky Blue North arm, slate S/E/W arms, center pivot]; reduced vertical padding and item spacing across all bottom popups [Settings, Maps, Places, Tools] and card shell; verified 15/15 unit tests passing and clean APK assembly).
+- [x] Phase 3.4: Complete Main Map UI, Map Catalogue & Saved Map Compositions (Implemented Map Catalogue subpage under More Settings with 4 sections: Saved Compositions management with pin/unpin quick choices, Map Composition Builder for custom overlay combinations and satellite opacity, Supported Sources & Styles Directory with genuine attribution and licensing, and Offline Storage Accounting with exact on-disk byte metrics and safe per-provider cache clearing; reworked bottom-bar Maps popup to display only pinned quick-choices with direct link to Map Catalogue; wired BackHandler to return from Map Catalogue to More Settings and preserved MapView lifecycle intact; expanded unit test suite to 20/20 passing).
+- [x] Phase 3.5: Reduce Padding Above and Below Item Cards in Bottom Bar Popups (Tightened header-to-list spacers, inter-item card spacing, and card internal vertical padding across Settings, Maps, Places, and Tools popups).
 
 ## 5. Ledger of Changes
 - 2026-11-06: Initialized BLUEPRINT.md.
@@ -63,10 +65,12 @@
 - 2026-11-07: Completed Phase 3.0 (MapView Lifecycle Decoupling, Hardware Telemetry & Progressive Tile Retention Foundation).
 - 2026-11-08: Completed Phase 3.1 (Complete Hybrid Map, Visible-Tile Acquisition & Offline Pipeline).
 - 2026-11-08: Completed Phase 3.2 (Settings Entry, 3-Item Popup & More Settings Workspace).
-- 2026-11-09: Completed Phase 3.3 (Top Panel Width, Cross Compass & Popup Spacing):
-  - In `MapTelemetryOverlays.kt`, transformed `MapCompassIndicator` into a clean 4-axis cross reticle (`+`) with Sky Blue primary North arm, neutral slate S/E/W arms, and a center pivot dot.
-  - In `TopCoordinateInfoPanel.kt`, tightened `formatDms` spacing, reduced coordinate font size to `11.5.sp`, reduced internal padding to `horizontal = 6.dp, vertical = 3.dp`, and adjusted chevron size to `14.dp`.
-  - In `MainMapScreen.kt`, added `end = 58.dp` constraint to the top-start cluster column, physically safeguarding the compass from overlap.
-  - In `AppModalManager.kt`, reduced outer `FloatingPopupDialog` padding from `14.dp` to `10.dp`, reduced item vertical padding in `SettingsPopupContent` from `10.dp` to `4.dp` (spacers `6.dp` -> `3.dp`), reduced `MapsPopupContent` style padding to `5.dp`, reduced `PlacesPopupContent` item padding to `3.dp`, and tightened `ToolsPopupContent` item padding to `3.dp` (row gap `4.dp` -> `2.dp`).
-  - Maintained 15/15 passing JVM unit tests and verified clean APK build.
+- 2026-11-09: Completed Phase 3.3 (Top Panel Width, Cross Compass & Popup Spacing).
+- 2026-11-09: Completed Phase 3.4 (Main Map UI, Map Catalogue & Saved Map Compositions).
+- 2026-11-09: Completed Phase 3.5 (Bottom Bar Popup Item Card Spacing Refinement):
+  - In `SettingsPopupContent`, reduced header spacer from 10dp to 4dp, item card internal vertical padding from 4dp to 2.5dp, and inter-card spacers from 3dp to 2dp.
+  - In `MapsPopupContent`, reduced subtitle spacers from 6dp to 3dp, card external vertical padding from 2dp to 1dp, card internal vertical padding from 5dp to 2.5dp, divider spacers from 8dp/6dp to 4dp, and button vertical padding from 6dp to 4dp.
+  - In `PlacesPopupContent`, reduced header and button spacers to 3dp, and `PlaceItemRow` internal vertical padding from 3dp to 2dp.
+  - In `ToolsPopupContent`, reduced header spacer to 3dp, list item spacing to 1.5dp, and item internal vertical padding from 3dp to 2dp.
+  - Maintained 20/20 passing JVM unit tests and verified clean APK build.
 

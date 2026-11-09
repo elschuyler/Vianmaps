@@ -56,3 +56,55 @@ This file series is the project's permanent audit trail across sessions. Each fi
   - On-device claim only: not tested on physical hardware in this turn (verified via JVM unit test suite and compilation).
 * **Deviations from request**: None.
 * **Known issues / follow-up**: None. Ready for on-device manual QA.
+
+---
+
+### Entry 2026-11-09T21:35:00Z — Phase 3.4: Complete Main Map UI, Map Catalogue & Saved Map Compositions
+* **Summary**: Implement Map Catalogue subpage, saved map compositions and layer builder, per-source offline storage audit, reworked quick-choice map popup, and More Settings navigation.
+* **Exact files touched**:
+  - `app/src/main/java/com/example/map/composition/MapComposition.kt` (created model for saved compositions, default starter compositions [Satellite Hybrid, Everyday Street, Explore & Boundaries, High-Contrast Navigation, Muted Positron], and JSON list serialization/deserialization)
+  - `app/src/main/java/com/example/data/storage/StorageCalculationManager.kt` (created storage audit manager calculating exact on-disk byte footprint for tile files by provider, Room SQLite `map_app_master.db` + WAL/SHM file size, OSM feature counts, routing graph files, and safe per-provider cache clearing)
+  - `app/src/main/java/com/example/data/db/AppDatabase.kt` (added `getTileCountByProvider`, `getBytesByProvider`, and `deleteTilesByProvider` queries to `RetainedTileDao`)
+  - `app/src/main/java/com/example/data/preferences/AppPreferencesRepository.kt` (added DataStore keys and persistence functions for `activeCompositionId` and `savedCompositionsJson`)
+  - `app/src/main/java/com/example/map/engine/MapEngineController.kt` (added `applyComposition` and `applyCompositionOverlays` for instant dynamic toggling of roads, labels, POIs, boundaries, and buildings layers)
+  - `app/src/main/java/com/example/ui/screens/MapViewModel.kt` (added `activeComposition`, `savedCompositions`, `storageReport`, and composition management functions: select, save, delete, duplicate, toggle pin, refresh storage, clear provider cache)
+  - `app/src/main/java/com/example/ui/components/MapCatalogueWorkspace.kt` (created full-screen More Settings subpage with Saved Compositions list, Composition Builder, Supported Sources Catalogue with licensing/attribution, and Offline Storage Accounting)
+  - `app/src/main/java/com/example/ui/components/AppModalManager.kt` (reworked `MapsPopupContent` to show only pinned quick choices with direct link to Map Catalogue, updated `MoreSettingsWorkspace` with navigation card and corrected default style to Satellite Hybrid, made helper cards internal)
+  - `app/src/main/java/com/example/ui/screens/MainMapScreen.kt` (wired BackHandler so Map Catalogue returns to More Settings, wired all composition and storage callbacks while preserving MapView lifecycle completely untouched)
+  - `app/src/test/java/com/example/ExampleUnitTest.kt` (added unit tests 16 through 20 covering MapComposition serialization, MapCatalogue backstack, composition switching, pin toggling, storage formatting, and safe cache clearing)
+  - `BLUEPRINT.md` (documented Phase 3.4 in development phases and ledger)
+  - `receipts/RECEIPTS_002.md` (appended Phase 3.4 entry)
+* **What was actually done**:
+  - Main map popup reworked: Removed obsolete non-functional "Layers" and "Custom" tabs; popup now displays only user-saved pinned map setups (quick-choices) with active checkmark, compact height, `LazyColumn` scrolling, and a direct navigation action button to "Map Catalogue & Setups".
+  - Created full-screen Map Catalogue workspace accessible via More Settings, featuring 4 cohesive sections:
+    1. Saved Map Compositions: lists user compositions with active indicators, pin/unpin toggles for popup quick choices, activate buttons, builder edit buttons, duplication, and deletion with confirmation dialog.
+    2. Map Composition Builder: customizable setup name/description, base map selection, overlay feature toggles (Roads, Labels, POIs, Boundaries, Buildings), satellite opacity slider, compatibility explanations, save/reset actions.
+    3. Supported Sources & Licensing Directory: complete transparent catalog of operational providers (ESRI World Imagery, OpenFreeMap Liberty/Bright/Positron, OpenStreetMap Carto), clear distinction between base maps and overlays, attribution, and honest notice for planned elevation DEM contours.
+    4. Offline Storage Accounting & Cache Management: exact byte and tile footprint breakdown by provider, Room SQLite database file length and feature counts, routing graph status, storage recalculate button, and safe per-provider cache clearing without touching shared SQLite features.
+  - Back navigation hierarchy: Map Catalogue Back button returns to More Settings; More Settings Back button returns directly to the map surface.
+  - Complete MapView safety: MapView instance, lifecycle observer keys, and local Room offline feature stores remained completely isolated and unharmed.
+* **How it was verified**:
+  - Verified local JVM unit test suite via `gradle :app:testDebugUnitTest`: 20/20 tests passed (BUILD SUCCESSFUL in 23s, 100% success rate).
+  - Verified container applet build via `compile_applet` tool: Build succeeded in 10s.
+  - On-device claim only: not tested on physical hardware in this turn (verified via JVM unit test suite and compilation).
+* **Deviations from request**: None.
+* **Known issues / follow-up**: None. Ready for on-device manual QA.
+
+---
+
+### Entry 2026-11-09T21:48:00Z — Phase 3.5: Reduce Padding Above and Below Item Cards in Bottom Bar Popups
+* **Summary**: Tighten vertical padding and inter-item spacers in bottom-bar popups (Settings, Maps, Places, Tools).
+* **Exact files touched**:
+  - `app/src/main/java/com/example/ui/components/AppModalManager.kt` (reduced header spacer to 4dp and inter-item spacers to 2dp in `SettingsPopupContent`; reduced internal vertical padding to 2.5dp across Settings and Maps cards; reduced external item margin to 1dp and divider spacers to 4dp in `MapsPopupContent`; reduced `PlaceItemRow` and `ToolsPopupContent` item padding to 2dp and header spacers to 3dp)
+  - `receipts/RECEIPTS_002.md` (appended Phase 3.5 entry)
+* **What was actually done**:
+  - In `SettingsPopupContent`: reduced header spacer from 10dp to 4dp; tightened item internal vertical padding from 4dp to 2.5dp; reduced inter-card spacers from 3dp to 2dp.
+  - In `MapsPopupContent`: reduced subtitle spacers from 6dp to 3dp; tightened card external vertical margin from 2dp to 1dp; reduced card internal vertical padding from 5dp to 2.5dp; reduced divider spacers from 8dp/6dp to 4dp; reduced Catalogue button padding from 6dp to 4dp.
+  - In `PlacesPopupContent`: reduced header spacer and button spacer to 3dp; reduced `PlaceItemRow` internal vertical padding from 3dp to 2dp.
+  - In `ToolsPopupContent`: reduced header spacer to 3dp; reduced list item spacing to 1.5dp; reduced item internal vertical padding from 3dp to 2dp.
+* **How it was verified**:
+  - Verified local JVM unit test suite via `gradle :app:testDebugUnitTest`: 20/20 tests passed (BUILD SUCCESSFUL in 15s).
+  - Verified container applet build via `compile_applet` tool: Build succeeded in 42s.
+  - On-device claim only: not tested on physical hardware in this turn (verified via JVM unit test suite and compilation).
+* **Deviations from request**: None.
+* **Known issues / follow-up**: None. Ready for on-device manual QA.

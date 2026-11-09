@@ -58,6 +58,15 @@ interface RetainedTileDao {
 
     @Query("DELETE FROM retained_tiles WHERE providerId = :providerId AND category = :category AND z = :z AND x = :x AND y = :y")
     suspend fun deleteTile(providerId: String, category: String, z: Int, x: Int, y: Int)
+
+    @Query("SELECT COUNT(*) FROM retained_tiles WHERE providerId = :providerId")
+    suspend fun getTileCountByProvider(providerId: String): Int
+
+    @Query("SELECT SUM(byteSize) FROM retained_tiles WHERE providerId = :providerId")
+    suspend fun getBytesByProvider(providerId: String): Long?
+
+    @Query("DELETE FROM retained_tiles WHERE providerId = :providerId")
+    suspend fun deleteTilesByProvider(providerId: String): Int
 }
 
 @Entity(tableName = "osm_pois")

@@ -75,6 +75,9 @@ import com.example.ui.theme.TextDarkMuted
 import com.example.ui.theme.TextDarkPrimary
 import com.example.ui.theme.TextDarkSecondary
 
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.material.icons.filled.Layers
+import com.example.map.composition.MapComposition
 import androidx.compose.material.icons.filled.Terminal
 import com.example.ui.screens.MapUiState
 
@@ -87,9 +90,18 @@ fun AppModalManager(
     isDeviceOnline: Boolean,
     connectionType: String,
     onSelectStyle: (MapStyleDefinition) -> Unit,
+    onSelectComposition: (MapComposition) -> Unit,
+    onSaveComposition: (MapComposition) -> Unit,
+    onDeleteComposition: (String) -> Unit,
+    onDuplicateComposition: (MapComposition) -> Unit,
+    onTogglePinComposition: (String) -> Unit,
+    onRefreshStorageReport: () -> Unit,
+    onClearProviderCache: (String) -> Unit,
     onDismissModal: () -> Unit,
     onDismissSettingsPopup: () -> Unit,
     onOpenMoreSettings: () -> Unit,
+    onOpenMapCatalogue: () -> Unit,
+    onBackFromMapCatalogue: () -> Unit,
     onOpenBackupRestore: () -> Unit,
     onOpenTool: (name: String, desc: String) -> Unit,
     onOpenMemoryPalace: () -> Unit,
@@ -109,7 +121,25 @@ fun AppModalManager(
     when (activeModal) {
         is ActiveModal.MoreSettings -> {
             FullScreenModal(title = "More Settings", onClose = onDismissModal) {
-                MoreSettingsWorkspace()
+                MoreSettingsWorkspace(onOpenMapCatalogue = onOpenMapCatalogue)
+            }
+        }
+        is ActiveModal.MapCatalogue -> {
+            FullScreenModal(title = "Map Catalogue & Setups", onClose = onBackFromMapCatalogue) {
+                MapCatalogueWorkspace(
+                    uiState = uiState,
+                    onSelectComposition = { comp ->
+                        onSelectComposition(comp)
+                        onDismissModal()
+                    },
+                    onSaveComposition = onSaveComposition,
+                    onDeleteComposition = onDeleteComposition,
+                    onDuplicateComposition = onDuplicateComposition,
+                    onTogglePinComposition = onTogglePinComposition,
+                    onRefreshStorage = onRefreshStorageReport,
+                    onClearProviderCache = onClearProviderCache,
+                    onBack = onBackFromMapCatalogue
+                )
             }
         }
         is ActiveModal.BackupRestore -> {
@@ -129,8 +159,15 @@ fun AppModalManager(
         is ActiveModal.MapsPopup -> {
             FloatingPopupDialog(onDismiss = onDismissModal) {
                 MapsPopupContent(
-                    currentStyle = currentStyle,
-                    onSelectStyle = onSelectStyle,
+                    uiState = uiState,
+                    onSelectComposition = { comp ->
+                        onDismissModal()
+                        onSelectComposition(comp)
+                    },
+                    onOpenMapCatalogue = {
+                        onDismissModal()
+                        onOpenMapCatalogue()
+                    },
                     onClose = onDismissModal
                 )
             }
@@ -296,7 +333,7 @@ fun SettingsPopupContent(
             }
         }
 
-        Spacer(modifier = Modifier.height(10.dp))
+        Spacer(modifier = Modifier.height(4.dp))
 
         // 1. Backup & Restore (Planned / Not yet available badge)
         Row(
@@ -308,7 +345,7 @@ fun SettingsPopupContent(
                     onClose()
                     onOpenBackupRestore()
                 }
-                .padding(horizontal = 10.dp, vertical = 4.dp),
+                .padding(horizontal = 10.dp, vertical = 2.5.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Icon(
@@ -351,7 +388,7 @@ fun SettingsPopupContent(
             }
         }
 
-        Spacer(modifier = Modifier.height(3.dp))
+        Spacer(modifier = Modifier.height(2.dp))
 
         // 2. Log Keeper
         Row(
@@ -363,7 +400,7 @@ fun SettingsPopupContent(
                     onClose()
                     onOpenLogKeeper()
                 }
-                .padding(horizontal = 10.dp, vertical = 4.dp),
+                .padding(horizontal = 10.dp, vertical = 2.5.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Icon(
@@ -388,7 +425,7 @@ fun SettingsPopupContent(
             }
         }
 
-        Spacer(modifier = Modifier.height(3.dp))
+        Spacer(modifier = Modifier.height(2.dp))
 
         // 3. More Settings
         Row(
@@ -400,7 +437,7 @@ fun SettingsPopupContent(
                     onClose()
                     onOpenMoreSettings()
                 }
-                .padding(horizontal = 10.dp, vertical = 4.dp),
+                .padding(horizontal = 10.dp, vertical = 2.5.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Icon(
@@ -429,12 +466,15 @@ fun SettingsPopupContent(
 
 @Composable
 fun MapsPopupContent(
-    currentStyle: MapStyleDefinition,
-    onSelectStyle: (MapStyleDefinition) -> Unit,
+    uiState: MapUiState,
+    onSelectComposition: (MapComposition) -> Unit,
+    onOpenMapCatalogue: () -> Unit,
     onClose: () -> Unit
 ) {
-    var selectedTab by remember { mutableIntStateOf(0) }
-    val tabs = listOf("Maps", "Layers", "Custom")
+    val pinnedCompositions = remember(uiState.savedCompositions) {
+        val pinned = uiState.savedCompositions.filter { it.isPinnedToQuickChoice }
+        if (pinned.isEmpty()) uiState.savedCompositions else pinned
+    }
 
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(
@@ -443,7 +483,7 @@ fun MapsPopupContent(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = "Map Sources & Styles",
+                text = "Map Setups",
                 fontSize = 15.sp,
                 fontWeight = FontWeight.Bold,
                 color = TextDarkPrimary
@@ -453,91 +493,96 @@ fun MapsPopupContent(
             }
         }
 
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(3.dp))
 
-        TabRow(
-            selectedTabIndex = selectedTab,
-            containerColor = SurfaceOffWhite,
-            contentColor = SkyBluePrimary
+        Text(
+            text = "Quick Choices",
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = TextDarkSecondary
+        )
+
+        Spacer(modifier = Modifier.height(3.dp))
+
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 240.dp)
         ) {
-            tabs.forEachIndexed { index, title ->
-                Tab(
-                    selected = selectedTab == index,
-                    onClick = { selectedTab = index },
-                    text = {
+            items(pinnedCompositions, key = { it.id }) { comp ->
+                val isSelected = comp.id == uiState.activeComposition.id
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 1.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(if (isSelected) SkyBlueLight else SurfaceOffWhite)
+                        .border(
+                            width = if (isSelected) 1.dp else 0.dp,
+                            color = if (isSelected) SkyBlueBorder else Color.Transparent,
+                            shape = RoundedCornerShape(10.dp)
+                        )
+                        .clickable { onSelectComposition(comp) }
+                        .padding(horizontal = 10.dp, vertical = 2.5.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            title,
-                            fontSize = 12.sp,
-                            fontWeight = if (selectedTab == index) FontWeight.Bold else FontWeight.Medium,
-                            color = if (selectedTab == index) SkyBluePrimary else TextDarkSecondary
+                            text = comp.name,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = if (isSelected) SkyBlueDim else TextDarkPrimary
+                        )
+                        Text(
+                            text = "${comp.baseStyle.displayName} • ${if (comp.showRoads) "Roads" else "No Roads"}",
+                            fontSize = 10.sp,
+                            color = TextDarkSecondary
                         )
                     }
-                )
+                    if (isSelected) {
+                        Icon(Icons.Default.Check, contentDescription = "Selected", tint = SkyBluePrimary, modifier = Modifier.size(18.dp))
+                    }
+                }
             }
         }
 
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(4.dp))
+        HorizontalDivider(color = SurfaceBorderLight, thickness = 0.5.dp)
+        Spacer(modifier = Modifier.height(4.dp))
 
-        when (selectedTab) {
-            0 -> {
-                Text("Base Styles (2D)", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = TextDarkPrimary)
-                Spacer(modifier = Modifier.height(6.dp))
-                MapSourceRepository.availableStyles.forEach { style ->
-                    val isSelected = style.id == currentStyle.id
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(if (isSelected) SkyBlueLight else SurfaceOffWhite)
-                            .border(
-                                width = if (isSelected) 1.dp else 0.dp,
-                                color = if (isSelected) SkyBlueBorder else Color.Transparent,
-                                shape = RoundedCornerShape(10.dp)
-                            )
-                            .clickable { onSelectStyle(style) }
-                            .padding(horizontal = 10.dp, vertical = 5.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                style.displayName,
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = if (isSelected) SkyBlueDim else TextDarkPrimary
-                            )
-                            Text(style.attribution, fontSize = 10.sp, color = TextDarkSecondary)
-                            if (style.isTemporaryDevelopmentStyle) {
-                                Text("Dev Style: Non-persistent tile license", fontSize = 9.sp, color = TextDarkMuted)
-                            }
-                        }
-                        if (isSelected) {
-                            Icon(Icons.Default.Check, contentDescription = "Selected", tint = SkyBluePrimary, modifier = Modifier.size(18.dp))
-                        }
-                    }
-                    Spacer(modifier = Modifier.height(3.dp))
-                }
-
-                Spacer(modifier = Modifier.height(6.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(Icons.Default.Info, contentDescription = null, tint = TextDarkMuted, modifier = Modifier.size(14.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("3D Mode: Planned for future milestone", fontSize = 10.sp, color = TextDarkMuted)
-                }
+        // Direct action button to Map Catalogue
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(8.dp))
+                .background(SurfaceOffWhite)
+                .clickable { onOpenMapCatalogue() }
+                .padding(horizontal = 8.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Default.Layers,
+                    contentDescription = null,
+                    tint = SkyBluePrimary,
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = "Map Catalogue & Setups",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = SkyBlueDim
+                )
             }
-            1 -> {
-                Text("Map Overlays & Layers", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = TextDarkPrimary)
-                Spacer(modifier = Modifier.height(6.dp))
-                Text("Independent layers (weather radar, contour lines, hiking tracks) are currently unavailable in Milestone 1.", fontSize = 11.sp, color = TextDarkSecondary)
-            }
-            2 -> {
-                Text("Custom Maps Workspace", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = TextDarkPrimary)
-                Spacer(modifier = Modifier.height(6.dp))
-                Text("Custom MBTiles raster packs, GeoJSON imports, and offline packages will be configured here.", fontSize = 11.sp, color = TextDarkSecondary)
-            }
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                contentDescription = null,
+                tint = SkyBlueDim,
+                modifier = Modifier.size(14.dp)
+            )
         }
     }
 }
@@ -558,13 +603,13 @@ fun PlacesPopupContent(
                 Icon(Icons.Default.Close, contentDescription = "Close", tint = TextDarkSecondary, modifier = Modifier.size(18.dp))
             }
         }
-        Spacer(modifier = Modifier.height(4.dp))
+        Spacer(modifier = Modifier.height(3.dp))
 
         PlaceItemRow(title = "Placemarks", icon = Icons.Default.PinDrop, subtitle = "0 saved landmarks")
         PlaceItemRow(title = "Routes", icon = Icons.Default.Route, subtitle = "0 recorded trails")
         PlaceItemRow(title = "Notes", icon = Icons.Default.Description, subtitle = "Spatial map notes")
 
-        Spacer(modifier = Modifier.height(4.dp))
+        Spacer(modifier = Modifier.height(3.dp))
         Button(
             onClick = onOpenMemoryPalace,
             colors = ButtonDefaults.buttonColors(
@@ -588,7 +633,7 @@ private fun PlaceItemRow(title: String, icon: ImageVector, subtitle: String) {
             .fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
             .background(SurfaceOffWhite)
-            .padding(horizontal = 8.dp, vertical = 3.dp),
+            .padding(horizontal = 8.dp, vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Icon(icon, contentDescription = null, tint = SkyBluePrimary, modifier = Modifier.size(18.dp))
@@ -626,11 +671,11 @@ fun ToolsPopupContent(
                 Icon(Icons.Default.Close, contentDescription = "Close", tint = TextDarkSecondary, modifier = Modifier.size(18.dp))
             }
         }
-        Spacer(modifier = Modifier.height(6.dp))
+        Spacer(modifier = Modifier.height(3.dp))
 
         LazyColumn(
             modifier = Modifier.heightIn(max = 280.dp),
-            verticalArrangement = Arrangement.spacedBy(2.dp)
+            verticalArrangement = Arrangement.spacedBy(1.5.dp)
         ) {
             items(tools) { (name, desc) ->
                 Row(
@@ -639,7 +684,7 @@ fun ToolsPopupContent(
                         .clip(RoundedCornerShape(8.dp))
                         .background(SurfaceOffWhite)
                         .clickable { onSelectTool(name, desc) }
-                        .padding(horizontal = 8.dp, vertical = 3.dp),
+                        .padding(horizontal = 8.dp, vertical = 2.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Column {
@@ -653,12 +698,53 @@ fun ToolsPopupContent(
 }
 
 @Composable
-fun MoreSettingsWorkspace() {
+fun MoreSettingsWorkspace(onOpenMapCatalogue: () -> Unit = {}) {
     Column(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
     ) {
+        // Map Catalogue & Setups Navigation Card
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(SkyBlueLight)
+                .border(1.dp, SkyBlueBorder, RoundedCornerShape(12.dp))
+                .clickable { onOpenMapCatalogue() }
+                .padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Default.Layers,
+                contentDescription = null,
+                tint = SkyBlueDim,
+                modifier = Modifier.size(24.dp)
+            )
+            Spacer(modifier = Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Map Catalogue & Setups",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = SkyBlueDim
+                )
+                Text(
+                    text = "Saved compositions, layer builder, source directory & offline storage",
+                    fontSize = 11.sp,
+                    color = TextDarkSecondary
+                )
+            }
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                contentDescription = "Open",
+                tint = SkyBlueDim,
+                modifier = Modifier.size(20.dp)
+            )
+        }
+
+        Spacer(modifier = Modifier.height(14.dp))
+
         Text(
             text = "System & Engine Configuration",
             fontSize = 13.sp,
@@ -678,7 +764,7 @@ fun MoreSettingsWorkspace() {
             Spacer(modifier = Modifier.height(6.dp))
             SettingsInfoRow(label = "Native Engine", value = "MapLibre Native Android v13.7.1")
             SettingsInfoRow(label = "Projection", value = "2D Orthographic MapView")
-            SettingsInfoRow(label = "Default Base Style", value = "OpenFreeMap Liberty Vector")
+            SettingsInfoRow(label = "Default Base Style", value = "Satellite Hybrid (ESRI + OSM Vector)")
             SettingsInfoRow(label = "Display Calibration", value = "Milestone 2 Foundation")
         }
 
@@ -885,7 +971,7 @@ fun BackupRestoreContent(onBack: () -> Unit) {
 }
 
 @Composable
-private fun SettingsSectionCard(content: @Composable ColumnScope.() -> Unit) {
+internal fun SettingsSectionCard(content: @Composable ColumnScope.() -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -899,7 +985,7 @@ private fun SettingsSectionCard(content: @Composable ColumnScope.() -> Unit) {
 }
 
 @Composable
-private fun SettingsInfoRow(label: String, value: String) {
+internal fun SettingsInfoRow(label: String, value: String) {
     Row(
         modifier = Modifier
             .fillMaxWidth()

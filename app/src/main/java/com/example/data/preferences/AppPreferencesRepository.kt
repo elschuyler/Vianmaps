@@ -23,7 +23,9 @@ data class AppUserPreferences(
     val cameraState: MapCameraState = MapCameraState(),
     val isTopPanelCollapsed: Boolean = true,
     val isInternetEnabled: Boolean = true,
-    val selectedStyleId: String = "hybrid_satellite_osm"
+    val selectedStyleId: String = "hybrid_satellite_osm",
+    val activeCompositionId: String = "comp_satellite_hybrid",
+    val savedCompositionsJson: String? = null
 )
 
 class AppPreferencesRepository(private val context: Context) {
@@ -37,6 +39,8 @@ class AppPreferencesRepository(private val context: Context) {
         val TOP_PANEL_COLLAPSED = booleanPreferencesKey("top_panel_collapsed")
         val INTERNET_ENABLED = booleanPreferencesKey("pref_internet_enabled")
         val SELECTED_STYLE_ID = stringPreferencesKey("pref_selected_style_id")
+        val ACTIVE_COMPOSITION_ID = stringPreferencesKey("pref_active_composition_id")
+        val SAVED_COMPOSITIONS_JSON = stringPreferencesKey("pref_saved_compositions_json")
     }
 
     val userPreferencesFlow: Flow<AppUserPreferences> = context.dataStore.data.map { prefs ->
@@ -55,6 +59,9 @@ class AppPreferencesRepository(private val context: Context) {
             savedStyleId
         }
 
+        val activeCompId = prefs[Keys.ACTIVE_COMPOSITION_ID] ?: "comp_satellite_hybrid"
+        val savedCompsJson = prefs[Keys.SAVED_COMPOSITIONS_JSON]
+
         AppUserPreferences(
             cameraState = MapCameraState(
                 latitude = lat,
@@ -65,7 +72,9 @@ class AppPreferencesRepository(private val context: Context) {
             ),
             isTopPanelCollapsed = collapsed,
             isInternetEnabled = internet,
-            selectedStyleId = styleId
+            selectedStyleId = styleId,
+            activeCompositionId = activeCompId,
+            savedCompositionsJson = savedCompsJson
         )
     }
 
@@ -99,6 +108,18 @@ class AppPreferencesRepository(private val context: Context) {
     suspend fun saveSelectedStyleId(styleId: String) {
         context.dataStore.edit { prefs ->
             prefs[Keys.SELECTED_STYLE_ID] = styleId
+        }
+    }
+
+    suspend fun saveActiveCompositionId(compositionId: String) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.ACTIVE_COMPOSITION_ID] = compositionId
+        }
+    }
+
+    suspend fun saveSavedCompositionsJson(json: String) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.SAVED_COMPOSITIONS_JSON] = json
         }
     }
 }
