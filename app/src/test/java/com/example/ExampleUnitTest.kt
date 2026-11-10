@@ -581,8 +581,9 @@ class ExampleUnitTest {
         assertEquals(1, db.retainedTileDao().getTileCountByProvider("hybrid_(satellite_+_osm)"))
 
         // 3. Run migration
-        val migrated = com.example.data.storage.StorageCalculationManager.migrateLegacyStorage(context, db)
-        assertTrue(migrated > 0)
+        val report = com.example.data.storage.StorageCalculationManager.migrateLegacyStorage(context, db)
+        assertTrue(report.migratedFiles > 0 || report.migratedDbRecords > 0)
+        assertTrue(report.isClean)
 
         // 4. Verify post-migration state:
         // Legacy directory must be removed and canonical "openfreemap" directory must have the file
@@ -599,7 +600,7 @@ class ExampleUnitTest {
     }
 
     @Test
-    fun test24_verifyProviderClearPreservesOsmFeaturesAndOtherProviders() = runBlocking {
+    fun test24_verifyProviderClearPreservesOsmFeaturesAndOtherProviders(): Unit = runBlocking {
         val db = AppDatabase.getInstance(context)
         val osmRepo = OsmOfflineDataRepository(context)
 
@@ -641,11 +642,244 @@ class ExampleUnitTest {
         db.retainedTileDao().insertTiles(listOf(tileOfm, tileEsri))
 
         // 3. Clear openfreemap cache
-        com.example.data.storage.StorageCalculationManager.clearProviderTiles(context, db, "openfreemap")
+        val clearResult = com.example.data.storage.StorageCalculationManager.clearProviderTiles(context, db, "openfreemap")
+        assertTrue(clearResult.isSuccess)
+        assertEquals("openfreemap", clearResult.canonicalId)
 
         // 4. Assert: openfreemap tile deleted, esri_satellite tile remains intact, OSM POI preserved!
         assertEquals(0, db.retainedTileDao().getTileCountByProvider("openfreemap"))
         assertEquals(1, db.retainedTileDao().getTileCountByProvider("esri_satellite"))
         assertEquals(1, osmRepo.searchPois("Preserved").size)
+
+        // Clean up test tile
+        com.example.data.storage.StorageCalculationManager.clearProviderTiles(context, db, "esri_satellite")
+        Unit
+    }
+
+    @Test
+    fun test25_verifyIdenticalFilesDoNotLoseDataAndRemoveLegacyDuplicate() = runBlocking {
+        val db = AppDatabase.getInstance(context)
+        val retainedTilesRoot = File(context.filesDir, "retained_tiles")
+
+        val legacyDir = File(retainedTilesRoot, "openfreemap_liberty/OSM_VECTOR/10/1")
+        legacyDir.mkdirs()
+        val legacyFile = File(legacyDir, "1.pbf")
+        legacyFile.writeBytes("IDENTICAL_TILE_CONTENT_ABC".toByteArray())
+
+        val canonicalDir = File(retainedTilesRoot, "openfreemap/OSM_VECTOR/10/1")
+        canonicalDir.mkdirs()
+        val canonicalFile = File(canonicalDir, "1.pbf")
+        canonicalFile.writeBytes("IDENTICAL_TILE_CONTENT_ABC".toByteArray())
+
+        val report = com.example.data.storage.StorageCalculationManager.migrateLegacyStorage(context, db)
+        assertTrue(report.isClean)
+        assertTrue(report.skippedDuplicates >= 1)
+
+        // Canonical file preserved with unchanged content, legacy duplicate safely removed
+        assertTrue(canonicalFile.exists())
+        assertEquals("IDENTICAL_TILE_CONTENT_ABC", String(canonicalFile.readBytes()))
+        assertFalse(legacyFile.exists())
+    }
+
+    @Test
+    fun test26_verifyConflictingFileContentsPreservesBothAndReportsConflict() = runBlocking {
+        val db = AppDatabase.getInstance(context)
+        val retainedTilesRoot = File(context.filesDir, "retained_tiles")
+
+        val legacyDir = File(retainedTilesRoot, "hybrid_satellite_osm/OSM_VECTOR/10/2")
+        legacyDir.mkdirs()
+        val legacyFile = File(legacyDir, "2.pbf")
+        legacyFile.writeBytes("LEGACY_VERSION_DIFFERENT_DATA".toByteArray())
+
+        val canonicalDir = File(retainedTilesRoot, "openfreemap/OSM_VECTOR/10/2")
+        canonicalDir.mkdirs()
+        val canonicalFile = File(canonicalDir, "2.pbf")
+        canonicalFile.writeBytes("CANONICAL_VERSION_EXISTING_DATA".toByteArray())
+
+        val report = com.example.data.storage.StorageCalculationManager.migrateLegacyStorage(context, db)
+
+        // Must report conflict and NEVER silently delete or overwrite
+        assertFalse(report.isClean)
+        assertTrue(report.unresolvedFileConflicts.isNotEmpty())
+
+        // Both files must be preserved safely!
+        assertTrue(canonicalFile.exists())
+        assertEquals("CANONICAL_VERSION_EXISTING_DATA", String(canonicalFile.readBytes()))
+        assertTrue(legacyFile.exists())
+        assertEquals("LEGACY_VERSION_DIFFERENT_DATA", String(legacyFile.readBytes()))
+    }
+
+    @Test
+    fun test27_verifyCorruptCanonicalReplacedSafelyByValidLegacy() = runBlocking {
+        val db = AppDatabase.getInstance(context)
+        val retainedTilesRoot = File(context.filesDir, "retained_tiles")
+
+        // Canonical file is empty / corrupt (0 bytes)
+        val canonicalDir = File(retainedTilesRoot, "openfreemap/OSM_VECTOR/10/3")
+        canonicalDir.mkdirs()
+        val canonicalFile = File(canonicalDir, "3.pbf")
+        canonicalFile.writeBytes(ByteArray(0))
+        assertEquals(0L, canonicalFile.length())
+
+        // Legacy file has valid data
+        val legacyDir = File(retainedTilesRoot, "openfreemap_bright/OSM_VECTOR/10/3")
+        legacyDir.mkdirs()
+        val legacyFile = File(legacyDir, "3.pbf")
+        legacyFile.writeBytes("RECOVERED_VALID_LEGACY_TILE_DATA".toByteArray())
+
+        val report = com.example.data.storage.StorageCalculationManager.migrateLegacyStorage(context, db)
+        assertTrue(report.isClean)
+        assertTrue(report.migratedFiles >= 1)
+
+        // Canonical file replaced with valid data, legacy file removed
+        assertTrue(canonicalFile.exists())
+        assertEquals("RECOVERED_VALID_LEGACY_TILE_DATA", String(canonicalFile.readBytes()))
+        assertFalse(legacyFile.exists())
+    }
+
+    @Test
+    fun test28_verifyIdempotentRepeatedMigration() = runBlocking {
+        val db = AppDatabase.getInstance(context)
+
+        // First pass
+        val report1 = com.example.data.storage.StorageCalculationManager.migrateLegacyStorage(context, db)
+        assertTrue(report1.isClean)
+
+        // Second pass immediately after: must be clean and idempotent with 0 duplicate actions
+        val report2 = com.example.data.storage.StorageCalculationManager.migrateLegacyStorage(context, db)
+        assertTrue(report2.isClean)
+        assertEquals(0, report2.migratedFiles)
+        assertEquals(0, report2.migratedDbRecords)
+        assertTrue(report2.unresolvedFileConflicts.isEmpty())
+        assertTrue(report2.failures.isEmpty())
+    }
+
+    @Test
+    fun test29_verifyRoomPrimaryKeyCollisionsResolvedSafely() = runBlocking {
+        val db = AppDatabase.getInstance(context)
+        val retainedTilesRoot = File(context.filesDir, "retained_tiles")
+
+        val canonicalDir = File(retainedTilesRoot, "openfreemap/OSM_VECTOR/11/5")
+        canonicalDir.mkdirs()
+        val tileFile = File(canonicalDir, "5.pbf")
+        tileFile.writeBytes("CANONICAL_TILE_RECORD_PAYLOAD".toByteArray())
+
+        val canonicalEntity = RetainedTileEntity(
+            providerId = "openfreemap",
+            category = "OSM_VECTOR",
+            z = 11,
+            x = 5,
+            y = 5,
+            filePath = tileFile.absolutePath,
+            byteSize = tileFile.length(),
+            checksum = "matching_crc_777"
+        )
+        val duplicateLegacyEntity = RetainedTileEntity(
+            providerId = "openfreemap_positron",
+            category = "OSM_VECTOR",
+            z = 11,
+            x = 5,
+            y = 5,
+            filePath = tileFile.absolutePath,
+            byteSize = tileFile.length(),
+            checksum = "matching_crc_777"
+        )
+        db.retainedTileDao().insertTiles(listOf(canonicalEntity, duplicateLegacyEntity))
+
+        val report = com.example.data.storage.StorageCalculationManager.migrateLegacyStorage(context, db)
+        assertTrue(report.isClean)
+        assertTrue(report.skippedDuplicates >= 1)
+
+        // Canonical record preserved, duplicate legacy record removed without error
+        assertNotNull(db.retainedTileDao().getTile("openfreemap", "OSM_VECTOR", 11, 5, 5))
+        assertEquals(0, db.retainedTileDao().getTileCountByProvider("openfreemap_positron"))
+    }
+
+    @Test
+    fun test30_verifyMissingDiskFileReportedAsFailure() = runBlocking {
+        val db = AppDatabase.getInstance(context)
+
+        // Insert legacy entity pointing to a completely non-existent disk file
+        val orphanedLegacyEntity = RetainedTileEntity(
+            providerId = "osm_raster",
+            category = "SATELLITE_RASTER",
+            z = 9,
+            x = 1,
+            y = 2,
+            filePath = "/totally/non/existent/path/tile.bin",
+            byteSize = 100L,
+            checksum = "missing_chk"
+        )
+        db.retainedTileDao().insertTile(orphanedLegacyEntity)
+
+        val report = com.example.data.storage.StorageCalculationManager.migrateLegacyStorage(context, db)
+
+        // Missing file must be reported as a failure, not silently discarded
+        assertFalse(report.isClean)
+        assertTrue(report.failures.any { it.contains("Missing file") })
+    }
+
+    @Test
+    fun test31_verifyRasterAcquisitionReportingHonesty() = runBlocking {
+        val db = AppDatabase.getInstance(context)
+        com.example.data.storage.StorageCalculationManager.clearProviderTiles(context, db, "esri_satellite")
+        com.example.data.storage.StorageCalculationManager.clearProviderTiles(context, db, "openaerialmap")
+        val overallReport = com.example.data.storage.StorageCalculationManager.calculateStorage(context, db)
+
+        assertNotNull(overallReport.migrationReport)
+
+        val ofm = overallReport.perSource.find { it.providerId == "openfreemap" }
+        assertNotNull(ofm)
+        assertTrue(ofm!!.acquisitionStatus.contains("Active"))
+        assertTrue(ofm.retentionPolicy.contains("Permitted"))
+
+        val esri = overallReport.perSource.find { it.providerId == "esri_satellite" }
+        assertNotNull(esri)
+        assertTrue(esri!!.acquisitionStatus.contains("Restricted"))
+        assertTrue(esri.retentionPolicy.contains("Restricted"))
+        // Esri raster tiles must not be reported as offline-retained when count is 0
+        assertEquals(0, esri.tileCount)
+        assertFalse(esri.isOfflineRetained)
+
+        val oam = overallReport.perSource.find { it.providerId == "openaerialmap" }
+        assertNotNull(oam)
+        assertTrue(oam!!.acquisitionStatus.contains("Not Implemented"))
+        assertEquals(0, oam.tileCount)
+        assertFalse(oam.isOfflineRetained)
+    }
+
+    @Test
+    fun test32_verifyProviderClearResultAndSharedDataPreservation() = runBlocking {
+        val db = AppDatabase.getInstance(context)
+
+        // Insert OSM buildings and roads
+        val building = com.example.data.db.OsmBuildingRecord(
+            osmId = 88888L,
+            name = "Historic Tower",
+            sourceTileZ = 14,
+            sourceTileX = 10,
+            sourceTileY = 20
+        )
+        val road = com.example.data.db.OsmRoadRecord(
+            osmId = 77777L,
+            name = "Main Street",
+            highwayClass = "primary",
+            sourceTileZ = 14,
+            sourceTileX = 10,
+            sourceTileY = 20
+        )
+        db.osmBuildingDao().insertBuildings(listOf(building))
+        db.osmRoadDao().insertRoads(listOf(road))
+
+        assertEquals(1, db.osmBuildingDao().getBuildingCount())
+        assertEquals(1, db.osmRoadDao().getRoadCount())
+
+        // Clear provider
+        val clearResult = com.example.data.storage.StorageCalculationManager.clearProviderTiles(context, db, "openfreemap")
+        assertTrue(clearResult.isSuccess)
+
+        // Verify OSM buildings and roads remain 100% intact
+        assertEquals(1, db.osmBuildingDao().getBuildingCount())
+        assertEquals(1, db.osmRoadDao().getRoadCount())
     }
 }

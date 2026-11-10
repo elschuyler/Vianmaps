@@ -56,6 +56,7 @@
 - [x] Phase 3.4: Complete Main Map UI, Map Catalogue & Saved Map Compositions (Implemented Map Catalogue subpage under More Settings with 4 sections: Saved Compositions management with pin/unpin quick choices, Map Composition Builder for custom overlay combinations and satellite opacity, Supported Sources & Styles Directory with genuine attribution and licensing, and Offline Storage Accounting with exact on-disk byte metrics and safe per-provider cache clearing; reworked bottom-bar Maps popup to display only pinned quick-choices with direct link to Map Catalogue; wired BackHandler to return from Map Catalogue to More Settings and preserved MapView lifecycle intact; expanded unit test suite to 20/20 passing).
 - [x] Phase 3.5: Reduce Padding Above and Below Item Cards in Bottom Bar Popups (Tightened header-to-list spacers, inter-item card spacing, and card internal vertical padding across Settings, Maps, Places, and Tools popups).
 - [x] Phase 3.6: Focused Storage Provider Identity Fix (Separated visual map styles from underlying data providers with canonical lowercase IDs [openfreemap, esri_satellite, openaerialmap, maplibre_demo, osm_standard]; updated VisibleTileCoordinator, TileStorageManager, StorageCalculationManager, and MapCatalogueWorkspace; implemented idempotent legacy directory/Room record migration; ensured per-provider clearing strictly targets that provider without touching shared OSM features or other providers; expanded unit tests to 24/24 passing).
+- [x] Phase 3.6.1: Migration Safety & Acquisition Consistency (Hardened filesystem and Room legacy migration to be strictly loss-safe with CRC32 verification, temporary file writes, and conflict preservation; introduced StorageMigrationReport and ProviderClearResult models for complete observability; updated UI to display migration health notice; added honest acquisition status and retention policy indicators for vector vs raster providers; expanded unit tests to 32/32 passing).
 
 ## 5. Ledger of Changes
 - 2026-11-06: Initialized BLUEPRINT.md.
@@ -69,15 +70,14 @@
 - 2026-11-09: Completed Phase 3.3 (Top Panel Width, Cross Compass & Popup Spacing).
 - 2026-11-09: Completed Phase 3.4 (Main Map UI, Map Catalogue & Saved Map Compositions).
 - 2026-11-09: Completed Phase 3.5 (Bottom Bar Popup Item Card Spacing Refinement).
-- 2026-11-10: Completed Phase 3.6 (Focused Storage Provider Identity Fix):
-  - Defined canonical storage providers (`openfreemap`, `esri_satellite`, `openaerialmap`, `maplibre_demo`, `osm_standard`) in `MapStorageProviders` and added `resolveCanonicalProviderId` in `MapSourceRepository.kt`.
-  - Added `storageProviderId` and `rasterStorageProviderId` to `MapStyleDefinition`; decoupled visual styles (`openfreemap_liberty`, `openfreemap_bright`, `openfreemap_positron`) so they all reference the single underlying data provider `"openfreemap"`.
-  - Updated `VisibleTileCoordinator.kt` to acquire tiles under canonical `styleDef.storageProviderId` instead of transformed display names.
-  - Added `getAllProviderIds()` and `getTilesByProvider()` queries to `RetainedTileDao` in `AppDatabase.kt`.
-  - Implemented `migrateLegacyStorage` in `StorageCalculationManager.kt` to safely and idempotently migrate legacy disk folders and Room entities to canonical IDs.
-  - Updated `calculateStorage` to iterate canonical storage providers and clearly distinguish provider tile bytes, Room SQLite feature store bytes, and routing graph index bytes.
-  - Updated `clearProviderTiles` to purge both canonical and legacy directories for the selected provider while guaranteeing zero impact on shared OSM entities, other providers' tiles, or routing graph files.
-  - Updated `MapCatalogueWorkspace.kt` Section 3 to display canonical storage provider identities and Section 4 to list accurate per-source tile accounting.
-  - Expanded unit test suite from 20 to 24 tests in `ExampleUnitTest.kt`, covering canonical provider mappings, shared OpenFreeMap storage, legacy directory/database migration, and targeted cache clearing; all 24 passed (100%).
+- 2026-11-10: Completed Phase 3.6 (Focused Storage Provider Identity Fix).
+- 2026-11-10: Completed Phase 3.6.1 (Migration Safety & Acquisition Consistency):
+  - Hardened `StorageCalculationManager.migrateLegacyStorage`: added CRC32 checksum and length comparisons before any legacy file deletion; wrote files via `.migrating.tmp` with verified atomic renames; preserved conflicting files and reported them in `StorageMigrationReport` instead of silently overwriting or discarding data.
+  - Hardened Room entity migration: resolved primary key collisions safely, preserved canonical records, verified underlying disk files, and exposed unmigratable/missing records in `failures`.
+  - Added `StorageMigrationReport` model to `OverallStorageReport` and wired conflict banner into `MapCatalogueWorkspace.kt`.
+  - Clarified vector vs. raster acquisition boundaries: added `acquisitionPipelineStatus` and `retentionPolicyDescription` to `StorageProviderDefinition`; documented that `VisibleTileCoordinator` strictly retains OpenFreeMap vector tiles while raster layers (Esri, OAM) are rendered live by MapLibre C++ OpenGL engine with Esri offline retention restricted by its TOS.
+  - Updated `clearProviderTiles` to return structured `ProviderClearResult` and logged detailed operations in `MapViewModel.kt`.
+  - Expanded unit test suite from 24 to 32 tests in `ExampleUnitTest.kt` (covering safe identical file deduplication, content conflict preservation, corrupt target recovery, repeated migration idempotency, Room PK collision resolution, missing file failure reporting, honest raster acquisition status, and surgical provider clear with shared OSM preservation); all 32 tests passed (100% success rate).
+
 
 

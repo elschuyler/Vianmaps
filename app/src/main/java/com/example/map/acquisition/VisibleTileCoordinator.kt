@@ -62,6 +62,13 @@ data class AcquisitionCoverageStatus(
  * - Atomic persistence via TileStorageManager & MapLibre C++ OfflineManager resource injection
  * - Automatic OSM feature decoding (POIs, buildings, roads, regions) into Room Database
  * - Independent Valhalla graph coverage evaluation
+ *
+ * Vector vs. Raster Boundary Note:
+ * This coordinator strictly acquires OpenFreeMap OSM vector tiles (TileCategory.OSM_VECTOR)
+ * for the visible viewport. Raster imagery (e.g. Esri World Imagery or OpenAerialMap) is
+ * rendered directly by MapLibre's C++ OpenGL engine via raster layer source URLs into MapLibre's
+ * native ambient cache. There is no separate manual raster file downloader, and Esri imagery
+ * offline retention is restricted by its Terms of Use.
  */
 class VisibleTileCoordinator(
     private val context: Context,

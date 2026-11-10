@@ -135,3 +135,33 @@ This file series is the project's permanent audit trail across sessions. Each fi
   - On-device claim only: not tested on physical hardware in this turn (verified via JVM unit test suite and compilation).
 * **Deviations from request**: None.
 * **Known issues / follow-up**: None. Ready for on-device manual QA.
+
+---
+
+### Entry 2026-11-10T20:21:00Z — Phase 3.6.1: Migration Safety & Acquisition Consistency
+* **Summary**: Harden legacy storage migration against silent data loss using CRC32 checksums and atomic writes; introduce StorageMigrationReport and ProviderClearResult models; wire migration conflict reporting into UI; clarify vector vs. raster acquisition boundaries.
+* **Exact files touched**:
+  - `app/src/main/java/com/example/data/storage/StorageCalculationManager.kt` (hardened `migrateLegacyStorage` with CRC32 checks, `.migrating.tmp` writes, safe duplicate removal, and conflict preservation; introduced `StorageMigrationReport` and `ProviderClearResult`; updated `SourceStorageReport` with `acquisitionStatus`, `retentionPolicy`, and `isOfflineRetained`)
+  - `app/src/main/java/com/example/map/source/MapSourceRepository.kt` (added `retentionPolicyDescription` and `acquisitionPipelineStatus` to `StorageProviderDefinition` across all 5 canonical providers)
+  - `app/src/main/java/com/example/map/acquisition/VisibleTileCoordinator.kt` (clarified in KDoc that coordinator strictly retains OpenFreeMap vector tiles, while raster layers are rendered live into MapLibre C++ ambient cache with Esri offline retention restricted by terms)
+  - `app/src/main/java/com/example/ui/screens/MapViewModel.kt` (updated `clearProviderCache` to log structured `ProviderClearResult`)
+  - `app/src/main/java/com/example/ui/components/MapCatalogueWorkspace.kt` (wired `migrationReport` conflict notice card into Section 4, and displayed acquisition status / retention policy per source)
+  - `app/src/test/java/com/example/ExampleUnitTest.kt` (expanded test suite to 32 tests covering safe identical deduplication, content conflict preservation, corrupt target recovery, repeated migration idempotency, Room collision resolution, missing file failure reporting, honest raster acquisition status, and surgical provider clear with shared data preservation; all 32 passed)
+  - `BLUEPRINT.md` (updated Phase 3.6.1 in development phases and ledger)
+  - `receipts/RECEIPTS_002.md` (appended Phase 3.6.1 entry)
+* **What was actually done**:
+  - Fixed the legacy file migration vulnerability where existing canonical files could cause legacy files to be deleted without verified safety. Implemented `computeFileCrc32`:
+    * When both canonical and legacy files exist with identical CRC32 checksums, legacy duplicate is safely removed.
+    * When canonical file is corrupt/0-bytes and legacy file is valid, canonical file is safely replaced via temporary file with verified checksum.
+    * When both exist with different valid data (conflict), neither file is deleted or overwritten blindly; conflict is preserved and recorded in `StorageMigrationReport.unresolvedFileConflicts`.
+    * When canonical file does not exist, legacy file is copied via `.migrating.tmp`, CRC32-verified, atomically renamed, and verified before legacy deletion.
+  - Hardened Room migration: resolves primary key collisions, checks underlying disk file validity, updates canonical entities if target file is recovered, records missing files in `failures`, and returns a structured, observable `StorageMigrationReport`.
+  - Clarified vector vs. raster acquisition: accurately documented in `VisibleTileCoordinator.kt`, `MapStorageProviders`, and `MapCatalogueWorkspace.kt` that `VisibleTileCoordinator` retains OpenFreeMap vector tiles only. Raster imagery (Esri World Imagery, OpenAerialMap) is rendered on-the-fly by MapLibre's native C++ OpenGL engine into its ambient cache, with Esri permanent offline retention legally restricted by its Terms of Use.
+  - Updated `clearProviderTiles` to return `ProviderClearResult` detailing files, records, bytes deleted, and success state, guaranteeing zero deletion of other providers, shared OSM feature tables, or routing graph files.
+  - Maintained complete MapView lifecycle integrity: left MapView instantiation, AndroidView factory/release, and lifecycle observer in `MainMapScreen.kt` completely untouched.
+* **How it was verified**:
+  - Verified local JVM unit test suite via `gradle :app:testDebugUnitTest`: 32/32 tests passed (BUILD SUCCESSFUL in 21s, 100% success rate).
+  - Verified container build via `compile_applet` tool: Build succeeded in 19s.
+  - On-device claim only: not tested on physical hardware in this turn (verified via JVM unit test suite and compilation).
+* **Deviations from request**: None.
+* **Known issues / follow-up**: None. Ready for on-device manual QA.

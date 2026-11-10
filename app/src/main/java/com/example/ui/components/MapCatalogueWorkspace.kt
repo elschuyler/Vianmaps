@@ -648,6 +648,34 @@ fun MapCatalogueWorkspace(
 
             Spacer(modifier = Modifier.height(10.dp))
 
+            // Migration Health & Conflict Banner
+            val migration = report.migrationReport
+            if (migration != null && !migration.isClean) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0xFFFEF2F2))
+                        .border(1.dp, IndicatorAlert, RoundedCornerShape(8.dp))
+                        .padding(10.dp)
+                ) {
+                    Column {
+                        Text(
+                            text = "Storage Migration Notice: Unresolved Conflicts",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = IndicatorAlert
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        val issues = migration.unresolvedFileConflicts + migration.unresolvedDbConflicts + migration.failures
+                        issues.take(3).forEach { issue ->
+                            Text(text = "• $issue", fontSize = 10.sp, color = TextDarkPrimary)
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+
             // Per-Source Tile Cache Breakdown
             Text("Retained Tiles by Provider", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = TextDarkPrimary)
             Spacer(modifier = Modifier.height(6.dp))
@@ -665,6 +693,12 @@ fun MapCatalogueWorkspace(
                                 text = "${src.tileCount} tiles retained • ${src.formattedSize}",
                                 fontSize = 11.sp,
                                 color = if (src.tileCount > 0) SkyBlueDim else TextDarkMuted
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "${src.acquisitionStatus} • Retention: ${src.retentionPolicy}",
+                                fontSize = 9.5.sp,
+                                color = TextDarkSecondary
                             )
                         }
                         if (src.tileCount > 0) {

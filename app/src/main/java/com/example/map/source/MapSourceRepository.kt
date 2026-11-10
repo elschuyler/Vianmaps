@@ -35,7 +35,9 @@ data class StorageProviderDefinition(
     val displayName: String,
     val category: TileCategory,
     val providerTypeDescription: String,
-    val defaultRetentionPermitted: Boolean
+    val defaultRetentionPermitted: Boolean,
+    val retentionPolicyDescription: String = if (defaultRetentionPermitted) "Permanent offline retention permitted" else "Online viewing / transient cache only",
+    val acquisitionPipelineStatus: String = "Online Rendering Only"
 )
 
 object MapStorageProviders {
@@ -44,7 +46,9 @@ object MapStorageProviders {
         displayName = "OpenFreeMap",
         category = TileCategory.OSM_VECTOR,
         providerTypeDescription = "OpenStreetMap Vector Tiles",
-        defaultRetentionPermitted = true
+        defaultRetentionPermitted = true,
+        retentionPolicyDescription = "Permitted (ODbL Vector Data)",
+        acquisitionPipelineStatus = "Active (Visible Viewport Retention)"
     )
 
     val ESRI_SATELLITE = StorageProviderDefinition(
@@ -52,7 +56,9 @@ object MapStorageProviders {
         displayName = "Esri World Imagery",
         category = TileCategory.SATELLITE_RASTER,
         providerTypeDescription = "Satellite Raster Imagery",
-        defaultRetentionPermitted = false
+        defaultRetentionPermitted = false,
+        retentionPolicyDescription = "Restricted (Online Browsing Only)",
+        acquisitionPipelineStatus = "Online Rendering Only (Offline Retention Restricted by Terms of Use)"
     )
 
     val OPEN_AERIAL_MAP = StorageProviderDefinition(
@@ -60,7 +66,9 @@ object MapStorageProviders {
         displayName = "OpenAerialMap",
         category = TileCategory.SATELLITE_RASTER,
         providerTypeDescription = "Contributed Aerial Imagery",
-        defaultRetentionPermitted = true
+        defaultRetentionPermitted = true,
+        retentionPolicyDescription = "Permitted (CC-BY 4.0)",
+        acquisitionPipelineStatus = "Online Rendering Only (Dedicated Raster Retention Pipeline Not Implemented)"
     )
 
     val MAPLIBRE_DEMO = StorageProviderDefinition(
@@ -68,7 +76,9 @@ object MapStorageProviders {
         displayName = "MapLibre Demo Tiles",
         category = TileCategory.OSM_VECTOR,
         providerTypeDescription = "Diagnostic Vector Tiles",
-        defaultRetentionPermitted = false
+        defaultRetentionPermitted = false,
+        retentionPolicyDescription = "Restricted (Diagnostic Only)",
+        acquisitionPipelineStatus = "Diagnostic Only (Transient)"
     )
 
     val OSM_STANDARD = StorageProviderDefinition(
@@ -76,7 +86,9 @@ object MapStorageProviders {
         displayName = "OpenStreetMap Standard",
         category = TileCategory.SATELLITE_RASTER,
         providerTypeDescription = "Standard OSM Raster Tiles",
-        defaultRetentionPermitted = false
+        defaultRetentionPermitted = false,
+        retentionPolicyDescription = "Restricted (Tile Usage Policy)",
+        acquisitionPipelineStatus = "Online Fallback Only"
     )
 
     val allProviders = listOf(

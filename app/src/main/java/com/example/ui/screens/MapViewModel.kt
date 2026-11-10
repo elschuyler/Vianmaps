@@ -382,9 +382,19 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 val db = AppDatabase.getInstance(getApplication())
-                StorageCalculationManager.clearProviderTiles(getApplication(), db, providerId)
+                val result = StorageCalculationManager.clearProviderTiles(getApplication(), db, providerId)
+                DiagnosticRepository.log(
+                    severity = if (result.isSuccess) LogSeverity.INFO else LogSeverity.WARNING,
+                    source = "StorageCalculationManager",
+                    description = "Cleared cache for $providerId: ${result.filesDeleted} files, ${result.recordsDeleted} records, ${result.bytesDeleted} bytes (Success: ${result.isSuccess}${if (result.error != null) " - ${result.error}" else ""})"
+                )
                 refreshStorageReport()
-            } catch (_: Throwable) {
+            } catch (e: Throwable) {
+                DiagnosticRepository.log(
+                    severity = LogSeverity.ERROR,
+                    source = "StorageCalculationManager",
+                    description = "Failed clearing cache for $providerId: ${e.message}"
+                )
                 refreshStorageReport()
             }
         }
