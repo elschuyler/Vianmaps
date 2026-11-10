@@ -67,6 +67,12 @@ interface RetainedTileDao {
 
     @Query("DELETE FROM retained_tiles WHERE providerId = :providerId")
     suspend fun deleteTilesByProvider(providerId: String): Int
+
+    @Query("SELECT DISTINCT providerId FROM retained_tiles")
+    suspend fun getAllProviderIds(): List<String>
+
+    @Query("SELECT * FROM retained_tiles WHERE providerId = :providerId")
+    suspend fun getTilesByProvider(providerId: String): List<RetainedTileEntity>
 }
 
 @Entity(tableName = "osm_pois")

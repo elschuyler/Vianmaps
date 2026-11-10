@@ -1,5 +1,7 @@
 package com.example.map.source
 
+import com.example.data.tile.TileCategory
+
 /**
  * Encapsulates map style and source information, licensing status, and attribution.
  *
@@ -19,10 +21,115 @@ data class MapStyleDefinition(
     val rasterMinZoom: Float = 0f,
     val rasterMaxZoom: Float = 19f,
     val offlineRetentionPermitted: Boolean = true,
-    val vectorTileUrlTemplate: String = "https://tiles.openfreemap.org/planet/20261101_080013_pt/{z}/{x}/{y}.pbf"
+    val vectorTileUrlTemplate: String = "https://tiles.openfreemap.org/planet/20261101_080013_pt/{z}/{x}/{y}.pbf",
+    val storageProviderId: String = MapStorageProviders.OPEN_FREE_MAP.id,
+    val rasterStorageProviderId: String? = null
 )
 
+/**
+ * Definition of an underlying data provider that provides tiles to map styles.
+ * Visual styles (e.g. Liberty, Bright, Positron) share underlying providers (e.g. OpenFreeMap).
+ */
+data class StorageProviderDefinition(
+    val id: String,
+    val displayName: String,
+    val category: TileCategory,
+    val providerTypeDescription: String,
+    val defaultRetentionPermitted: Boolean
+)
+
+object MapStorageProviders {
+    val OPEN_FREE_MAP = StorageProviderDefinition(
+        id = "openfreemap",
+        displayName = "OpenFreeMap",
+        category = TileCategory.OSM_VECTOR,
+        providerTypeDescription = "OpenStreetMap Vector Tiles",
+        defaultRetentionPermitted = true
+    )
+
+    val ESRI_SATELLITE = StorageProviderDefinition(
+        id = "esri_satellite",
+        displayName = "Esri World Imagery",
+        category = TileCategory.SATELLITE_RASTER,
+        providerTypeDescription = "Satellite Raster Imagery",
+        defaultRetentionPermitted = false
+    )
+
+    val OPEN_AERIAL_MAP = StorageProviderDefinition(
+        id = "openaerialmap",
+        displayName = "OpenAerialMap",
+        category = TileCategory.SATELLITE_RASTER,
+        providerTypeDescription = "Contributed Aerial Imagery",
+        defaultRetentionPermitted = true
+    )
+
+    val MAPLIBRE_DEMO = StorageProviderDefinition(
+        id = "maplibre_demo",
+        displayName = "MapLibre Demo Tiles",
+        category = TileCategory.OSM_VECTOR,
+        providerTypeDescription = "Diagnostic Vector Tiles",
+        defaultRetentionPermitted = false
+    )
+
+    val OSM_STANDARD = StorageProviderDefinition(
+        id = "osm_standard",
+        displayName = "OpenStreetMap Standard",
+        category = TileCategory.SATELLITE_RASTER,
+        providerTypeDescription = "Standard OSM Raster Tiles",
+        defaultRetentionPermitted = false
+    )
+
+    val allProviders = listOf(
+        OPEN_FREE_MAP,
+        ESRI_SATELLITE,
+        OPEN_AERIAL_MAP,
+        MAPLIBRE_DEMO,
+        OSM_STANDARD
+    )
+
+    fun getProviderById(id: String): StorageProviderDefinition? {
+        val canonical = MapSourceRepository.resolveCanonicalProviderId(id)
+        return allProviders.firstOrNull { it.id == canonical }
+    }
+}
+
 object MapSourceRepository {
+
+    /**
+     * Resolves raw, legacy, or style identifiers to the canonical storage provider ID.
+     */
+    fun resolveCanonicalProviderId(rawId: String): String {
+        val normalized = rawId.trim().lowercase().replace(" ", "_")
+        return when (normalized) {
+            "openfreemap",
+            "openfreemap_liberty",
+            "openfreemap_bright",
+            "openfreemap_positron",
+            "hybrid_(satellite_+_osm)",
+            "hybrid_satellite_osm",
+            "osm_vector",
+            "openmaptiles" -> MapStorageProviders.OPEN_FREE_MAP.id
+
+            "esri",
+            "esri_world_imagery",
+            "esri_satellite" -> MapStorageProviders.ESRI_SATELLITE.id
+
+            "openaerialmap",
+            "open_aerial_map",
+            "hybrid_oam_osm" -> MapStorageProviders.OPEN_AERIAL_MAP.id
+
+            "maplibre",
+            "maplibre_demo",
+            "demotiles" -> MapStorageProviders.MAPLIBRE_DEMO.id
+
+            "openstreetmap",
+            "osm_raster",
+            "osm_carto",
+            "osm_standard" -> MapStorageProviders.OSM_STANDARD.id
+
+            else -> normalized
+        }
+    }
 
     // Default Hybrid: Satellite raster imagery + OpenFreeMap OSM vector overlay
     // Uses dependable global Esri World Imagery beneath OSM vector roads, highways, boundaries, and labels.
@@ -38,7 +145,9 @@ object MapSourceRepository {
         rasterSourceUri = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
         rasterMinZoom = 0f,
         rasterMaxZoom = 19f,
-        offlineRetentionPermitted = false // Raster imagery is online/cache only; OSM vector data is retained
+        offlineRetentionPermitted = false, // Raster imagery is online/cache only; OSM vector data is retained
+        storageProviderId = MapStorageProviders.OPEN_FREE_MAP.id,
+        rasterStorageProviderId = MapStorageProviders.ESRI_SATELLITE.id
     )
 
     // OpenAerialMap Hybrid candidate (Zoom 14+ imagery, CC-BY 4.0)
@@ -54,7 +163,9 @@ object MapSourceRepository {
         rasterSourceUri = "https://global.imagery.hotosm.org/{z}/{x}/{y}.png",
         rasterMinZoom = 14f,
         rasterMaxZoom = 19f,
-        offlineRetentionPermitted = true
+        offlineRetentionPermitted = true,
+        storageProviderId = MapStorageProviders.OPEN_FREE_MAP.id,
+        rasterStorageProviderId = MapStorageProviders.OPEN_AERIAL_MAP.id
     )
 
     // OpenFreeMap Liberty Vector Style
@@ -67,7 +178,9 @@ object MapSourceRepository {
         isTemporaryDevelopmentStyle = false,
         licenseNotes = "OpenFreeMap free vector tiles. Vector data retained for offline viewing.",
         isCompositeHybrid = false,
-        offlineRetentionPermitted = true
+        offlineRetentionPermitted = true,
+        storageProviderId = MapStorageProviders.OPEN_FREE_MAP.id,
+        rasterStorageProviderId = null
     )
 
     // OpenFreeMap Bright Vector Style
@@ -80,7 +193,9 @@ object MapSourceRepository {
         isTemporaryDevelopmentStyle = false,
         licenseNotes = "OpenFreeMap bright style. OpenStreetMap data under ODbL.",
         isCompositeHybrid = false,
-        offlineRetentionPermitted = true
+        offlineRetentionPermitted = true,
+        storageProviderId = MapStorageProviders.OPEN_FREE_MAP.id,
+        rasterStorageProviderId = null
     )
 
     // OpenFreeMap Positron (Subtle, muted vector style)
@@ -93,7 +208,9 @@ object MapSourceRepository {
         isTemporaryDevelopmentStyle = false,
         licenseNotes = "OpenFreeMap positron muted vector style.",
         isCompositeHybrid = false,
-        offlineRetentionPermitted = true
+        offlineRetentionPermitted = true,
+        storageProviderId = MapStorageProviders.OPEN_FREE_MAP.id,
+        rasterStorageProviderId = null
     )
 
     // Temporary diagnostic vector style for engine verification
@@ -106,7 +223,9 @@ object MapSourceRepository {
         isTemporaryDevelopmentStyle = true,
         licenseNotes = "Temporary lightweight diagnostic style used for engine rendering verification.",
         isCompositeHybrid = false,
-        offlineRetentionPermitted = false
+        offlineRetentionPermitted = false,
+        storageProviderId = MapStorageProviders.MAPLIBRE_DEMO.id,
+        rasterStorageProviderId = null
     )
 
     // OpenStreetMap standard fallback style
@@ -119,7 +238,9 @@ object MapSourceRepository {
         isTemporaryDevelopmentStyle = true,
         licenseNotes = "Standard OSM raster tile fallback. Subject to OSM tile usage policies.",
         isCompositeHybrid = false,
-        offlineRetentionPermitted = false
+        offlineRetentionPermitted = false,
+        storageProviderId = MapStorageProviders.OSM_STANDARD.id,
+        rasterStorageProviderId = null
     )
 
     val availableStyles = listOf(

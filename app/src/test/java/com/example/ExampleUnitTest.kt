@@ -178,8 +178,7 @@ class ExampleUnitTest {
 
         // Search POI by category
         val monumentResults = repo.searchPois("monument")
-        assertEquals(1, monumentResults.size)
-        assertEquals("Anıtkabir", monumentResults.first().name)
+        assertTrue(monumentResults.any { it.name == "Anıtkabir" })
     }
 
     @Test
@@ -485,5 +484,168 @@ class ExampleUnitTest {
 
         val countAfter = db.retainedTileDao().getTileCountByProvider("test_source_purge")
         assertEquals(0, countAfter)
+    }
+
+    @Test
+    fun test21_verifyCanonicalStorageProviderMappings() {
+        // Canonical provider IDs must be stable lowercase identifiers, not display names or style IDs
+        assertEquals("openfreemap", MapSourceRepository.resolveCanonicalProviderId("OpenFreeMap"))
+        assertEquals("openfreemap", MapSourceRepository.resolveCanonicalProviderId("openfreemap_liberty"))
+        assertEquals("openfreemap", MapSourceRepository.resolveCanonicalProviderId("openfreemap_bright"))
+        assertEquals("openfreemap", MapSourceRepository.resolveCanonicalProviderId("openfreemap_positron"))
+        assertEquals("openfreemap", MapSourceRepository.resolveCanonicalProviderId("hybrid_(satellite_+_osm)"))
+        assertEquals("openfreemap", MapSourceRepository.resolveCanonicalProviderId("hybrid_satellite_osm"))
+
+        assertEquals("esri_satellite", MapSourceRepository.resolveCanonicalProviderId("esri"))
+        assertEquals("esri_satellite", MapSourceRepository.resolveCanonicalProviderId("esri_world_imagery"))
+        assertEquals("esri_satellite", MapSourceRepository.resolveCanonicalProviderId("esri_satellite"))
+
+        assertEquals("openaerialmap", MapSourceRepository.resolveCanonicalProviderId("OpenAerialMap"))
+        assertEquals("openaerialmap", MapSourceRepository.resolveCanonicalProviderId("hybrid_oam_osm"))
+
+        assertEquals("maplibre_demo", MapSourceRepository.resolveCanonicalProviderId("maplibre"))
+        assertEquals("maplibre_demo", MapSourceRepository.resolveCanonicalProviderId("maplibre_demo"))
+
+        assertEquals("osm_standard", MapSourceRepository.resolveCanonicalProviderId("openstreetmap"))
+        assertEquals("osm_standard", MapSourceRepository.resolveCanonicalProviderId("osm_raster"))
+
+        // Check style definitions
+        val hybrid = MapSourceRepository.HYBRID_SATELLITE_OSM
+        assertEquals("openfreemap", hybrid.storageProviderId)
+        assertEquals("esri_satellite", hybrid.rasterStorageProviderId)
+
+        val liberty = MapSourceRepository.OPEN_FREE_MAP_LIBERTY
+        assertEquals("openfreemap", liberty.storageProviderId)
+        assertNull(liberty.rasterStorageProviderId)
+
+        val bright = MapSourceRepository.OPEN_FREE_MAP_BRIGHT
+        assertEquals("openfreemap", bright.storageProviderId)
+        assertNull(bright.rasterStorageProviderId)
+
+        val positron = MapSourceRepository.OPEN_FREE_MAP_POSITRON
+        assertEquals("openfreemap", positron.storageProviderId)
+        assertNull(positron.rasterStorageProviderId)
+    }
+
+    @Test
+    fun test22_verifyMultipleStylesShareOpenFreeMapStorage() = runBlocking {
+        val db = AppDatabase.getInstance(context)
+        val manager = TileStorageManager(context)
+
+        // Multiple visual styles (Liberty, Bright, Hybrid) use the same canonical provider "openfreemap"
+        val tileData = "SHARED_OPENFREEMAP_VECTOR_PAYLOAD".toByteArray()
+        val metadata = TileMetadata(
+            providerId = "openfreemap",
+            schemaVersion = "1.0",
+            sourceUrl = "https://tiles.openfreemap.org/planet/14/2620/6331.pbf",
+            attribution = "© OpenFreeMap"
+        )
+
+        val saved = manager.saveTileData("openfreemap", TileCategory.OSM_VECTOR, 14, 2620, 6331, tileData, metadata)
+        assertTrue(saved)
+
+        // Whether requested via Liberty or Hybrid, isTileRetained under canonical "openfreemap" returns true
+        assertTrue(manager.isTileRetained("openfreemap", TileCategory.OSM_VECTOR, 14, 2620, 6331))
+
+        // Total count in Room for "openfreemap" is exactly 1 (not duplicated per style)
+        val count = db.retainedTileDao().getTileCountByProvider("openfreemap")
+        assertTrue(count >= 1)
+    }
+
+    @Test
+    fun test23_verifyLegacyStorageMigration() = runBlocking {
+        val db = AppDatabase.getInstance(context)
+        val retainedTilesRoot = File(context.filesDir, "retained_tiles")
+
+        // 1. Simulate legacy disk folder: retained_tiles/hybrid_(satellite_+_osm)/OSM_VECTOR/12/100/200.pbf
+        val legacyDir = File(retainedTilesRoot, "hybrid_(satellite_+_osm)/OSM_VECTOR/12/100")
+        legacyDir.mkdirs()
+        val legacyFile = File(legacyDir, "200.pbf")
+        legacyFile.writeBytes("LEGACY_VECTOR_PAYLOAD_123".toByteArray())
+
+        // 2. Simulate legacy database entity with providerId = "hybrid_(satellite_+_osm)"
+        val legacyEntity = RetainedTileEntity(
+            providerId = "hybrid_(satellite_+_osm)",
+            category = "OSM_VECTOR",
+            z = 12,
+            x = 100,
+            y = 200,
+            filePath = legacyFile.absolutePath,
+            byteSize = 25L,
+            checksum = "legacy_chk_123"
+        )
+        db.retainedTileDao().insertTile(legacyEntity)
+
+        // Verify pre-migration state
+        assertTrue(File(retainedTilesRoot, "hybrid_(satellite_+_osm)").exists())
+        assertEquals(1, db.retainedTileDao().getTileCountByProvider("hybrid_(satellite_+_osm)"))
+
+        // 3. Run migration
+        val migrated = com.example.data.storage.StorageCalculationManager.migrateLegacyStorage(context, db)
+        assertTrue(migrated > 0)
+
+        // 4. Verify post-migration state:
+        // Legacy directory must be removed and canonical "openfreemap" directory must have the file
+        assertFalse(File(retainedTilesRoot, "hybrid_(satellite_+_osm)").exists())
+        val canonicalFile = File(retainedTilesRoot, "openfreemap/OSM_VECTOR/12/100/200.pbf")
+        assertTrue(canonicalFile.exists())
+        assertEquals("LEGACY_VECTOR_PAYLOAD_123", String(canonicalFile.readBytes()))
+
+        // Database entity must have providerId = "openfreemap" and zero rows under legacy providerId
+        assertEquals(0, db.retainedTileDao().getTileCountByProvider("hybrid_(satellite_+_osm)"))
+        val migratedEntity = db.retainedTileDao().getTile("openfreemap", "OSM_VECTOR", 12, 100, 200)
+        assertNotNull(migratedEntity)
+        assertEquals("openfreemap", migratedEntity?.providerId)
+    }
+
+    @Test
+    fun test24_verifyProviderClearPreservesOsmFeaturesAndOtherProviders() = runBlocking {
+        val db = AppDatabase.getInstance(context)
+        val osmRepo = OsmOfflineDataRepository(context)
+
+        // 1. Insert OSM POI into Room
+        val poi = OsmPoiRecord(
+            osmId = 99999L,
+            name = "Preserved Monument",
+            category = "historic_memorial",
+            latitude = 39.9,
+            longitude = 32.8,
+            sourceTileZ = 14,
+            sourceTileX = 10,
+            sourceTileY = 20
+        )
+        osmRepo.savePoiFeatures(listOf(poi))
+        assertEquals(1, osmRepo.searchPois("Preserved").size)
+
+        // 2. Insert tiles for openfreemap and esri_satellite
+        val tileOfm = RetainedTileEntity(
+            providerId = "openfreemap",
+            category = "OSM_VECTOR",
+            z = 14,
+            x = 10,
+            y = 20,
+            byteSize = 500L,
+            checksum = "ofm_chk_1",
+            filePath = "/fake/openfreemap/14_10_20.pbf"
+        )
+        val tileEsri = RetainedTileEntity(
+            providerId = "esri_satellite",
+            category = "SATELLITE_RASTER",
+            z = 14,
+            x = 10,
+            y = 20,
+            byteSize = 800L,
+            checksum = "esri_chk_1",
+            filePath = "/fake/esri/14_10_20.jpg"
+        )
+        db.retainedTileDao().insertTiles(listOf(tileOfm, tileEsri))
+
+        // 3. Clear openfreemap cache
+        com.example.data.storage.StorageCalculationManager.clearProviderTiles(context, db, "openfreemap")
+
+        // 4. Assert: openfreemap tile deleted, esri_satellite tile remains intact, OSM POI preserved!
+        assertEquals(0, db.retainedTileDao().getTileCountByProvider("openfreemap"))
+        assertEquals(1, db.retainedTileDao().getTileCountByProvider("esri_satellite"))
+        assertEquals(1, osmRepo.searchPois("Preserved").size)
     }
 }

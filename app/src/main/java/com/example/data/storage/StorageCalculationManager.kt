@@ -8,6 +8,8 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.Locale
 
+import com.example.map.source.MapStorageProviders
+
 /**
  * Storage metrics for an individual map provider / source.
  */
@@ -57,7 +59,8 @@ data class OverallStorageReport(
 )
 
 /**
- * Manages honest on-disk storage calculation and safe per-source cache purging.
+ * Manages honest on-disk storage calculation, legacy directory/Room record migration,
+ * and safe per-source cache purging.
  */
 object StorageCalculationManager {
 
@@ -74,22 +77,103 @@ object StorageCalculationManager {
         }
     }
 
-    suspend fun calculateStorage(context: Context, database: AppDatabase): OverallStorageReport = withContext(Dispatchers.IO) {
+    /**
+     * Safely and idempotently migrates legacy on-disk directories and Room metadata
+     * (e.g. style IDs or non-canonical provider names) to canonical storage provider IDs.
+     */
+    suspend fun migrateLegacyStorage(context: Context, database: AppDatabase): Int = withContext(Dispatchers.IO) {
+        var migratedCount = 0
         val retainedTilesRoot = File(context.filesDir, "retained_tiles")
 
-        // 1. Audit retained tile files per provider on disk
+        // 1. Migrate on-disk legacy directories
+        if (retainedTilesRoot.exists() && retainedTilesRoot.isDirectory) {
+            val subDirs = retainedTilesRoot.listFiles()?.filter { it.isDirectory } ?: emptyList()
+            for (dir in subDirs) {
+                val canonicalId = MapSourceRepository.resolveCanonicalProviderId(dir.name)
+                if (canonicalId != dir.name) {
+                    val canonicalDir = File(retainedTilesRoot, canonicalId)
+                    if (!canonicalDir.exists()) canonicalDir.mkdirs()
+
+                    // Move files recursively into canonical directory
+                    dir.walkTopDown().filter { it.isFile }.forEach { file ->
+                        val relPath = file.relativeTo(dir).path
+                        val targetFile = File(canonicalDir, relPath)
+                        targetFile.parentFile?.mkdirs()
+                        if (!targetFile.exists()) {
+                            file.copyTo(targetFile, overwrite = true)
+                        }
+                        file.delete()
+                        migratedCount++
+                    }
+                    dir.deleteRecursively()
+                }
+            }
+        }
+
+        // 2. Migrate Room Database records
+        try {
+            val allProviderIds = database.retainedTileDao().getAllProviderIds()
+            for (providerId in allProviderIds) {
+                val canonicalId = MapSourceRepository.resolveCanonicalProviderId(providerId)
+                if (canonicalId != providerId) {
+                    val legacyTiles = database.retainedTileDao().getTilesByProvider(providerId)
+                    for (tile in legacyTiles) {
+                        val existing = database.retainedTileDao().getTile(
+                            canonicalId,
+                            tile.category,
+                            tile.z,
+                            tile.x,
+                            tile.y
+                        )
+                        if (existing == null) {
+                            val updatedFilePath = if (tile.filePath.contains("/$providerId/")) {
+                                tile.filePath.replace("/$providerId/", "/$canonicalId/")
+                            } else {
+                                tile.filePath
+                            }
+                            val updatedTile = tile.copy(
+                                providerId = canonicalId,
+                                filePath = updatedFilePath
+                            )
+                            database.retainedTileDao().insertTile(updatedTile)
+                        }
+                        database.retainedTileDao().deleteTile(
+                            providerId,
+                            tile.category,
+                            tile.z,
+                            tile.x,
+                            tile.y
+                        )
+                        migratedCount++
+                    }
+                }
+            }
+        } catch (_: Throwable) {
+            // Non-fatal if Room table is empty or being initialized
+        }
+
+        migratedCount
+    }
+
+    suspend fun calculateStorage(context: Context, database: AppDatabase): OverallStorageReport = withContext(Dispatchers.IO) {
+        // Run migration first to ensure clean canonical accounting
+        migrateLegacyStorage(context, database)
+
+        val retainedTilesRoot = File(context.filesDir, "retained_tiles")
+
+        // 1. Audit retained tile files per canonical data provider
         val providerReports = mutableListOf<SourceStorageReport>()
-        val knownStyles = MapSourceRepository.availableStyles.filter { !it.isTemporaryDevelopmentStyle }
+        val canonicalProviders = MapStorageProviders.allProviders
 
         var totalTileBytes = 0L
 
-        for (style in knownStyles) {
-            val providerDir = File(retainedTilesRoot, style.id)
+        for (provider in canonicalProviders) {
+            val providerDir = File(retainedTilesRoot, provider.id)
             val (diskBytes, diskCount) = measureDirectory(providerDir)
-            
+
             // Reconcile with database if available
-            val dbCount = database.retainedTileDao().getTileCountByProvider(style.id)
-            val dbBytes = database.retainedTileDao().getBytesByProvider(style.id) ?: 0L
+            val dbCount = database.retainedTileDao().getTileCountByProvider(provider.id)
+            val dbBytes = database.retainedTileDao().getBytesByProvider(provider.id) ?: 0L
 
             val reportedCount = maxOf(diskCount, dbCount)
             val reportedBytes = maxOf(diskBytes, dbBytes)
@@ -97,9 +181,9 @@ object StorageCalculationManager {
 
             providerReports.add(
                 SourceStorageReport(
-                    providerId = style.id,
-                    providerName = style.displayName,
-                    providerType = if (style.isCompositeHybrid) "Satellite Hybrid" else "Vector Map",
+                    providerId = provider.id,
+                    providerName = provider.displayName,
+                    providerType = provider.providerTypeDescription,
                     tileCount = reportedCount,
                     byteSize = reportedBytes,
                     formattedSize = formatBytes(reportedBytes),
@@ -110,8 +194,9 @@ object StorageCalculationManager {
 
         // Check for any unlisted provider directories under retained_tiles
         if (retainedTilesRoot.exists() && retainedTilesRoot.isDirectory) {
+            val canonicalIds = canonicalProviders.map { it.id }.toSet()
             val unlistedDirs = retainedTilesRoot.listFiles()?.filter { dir ->
-                dir.isDirectory && knownStyles.none { it.id == dir.name }
+                dir.isDirectory && !canonicalIds.contains(dir.name)
             } ?: emptyList()
 
             for (dir in unlistedDirs) {
@@ -182,17 +267,38 @@ object StorageCalculationManager {
 
     /**
      * Safely purges cached tiles for a specific provider from disk and database,
-     * without touching user records or shared OSM features.
+     * without touching user records, shared OSM features, or other provider data.
      */
     suspend fun clearProviderTiles(context: Context, database: AppDatabase, providerId: String): Long = withContext(Dispatchers.IO) {
-        val providerDir = File(File(context.filesDir, "retained_tiles"), providerId)
-        val bytesDeleted = if (providerDir.exists()) {
-            val (bytes, _) = measureDirectory(providerDir)
-            providerDir.deleteRecursively()
-            bytes
-        } else 0L
+        val canonicalId = MapSourceRepository.resolveCanonicalProviderId(providerId)
+        val retainedTilesRoot = File(context.filesDir, "retained_tiles")
 
-        database.retainedTileDao().deleteTilesByProvider(providerId)
+        var bytesDeleted = 0L
+
+        // 1. Purge canonical folder
+        val canonicalDir = File(retainedTilesRoot, canonicalId)
+        if (canonicalDir.exists()) {
+            val (bytes, _) = measureDirectory(canonicalDir)
+            canonicalDir.deleteRecursively()
+            bytesDeleted += bytes
+        }
+
+        // 2. Also purge legacy folder if different
+        if (canonicalId != providerId) {
+            val rawDir = File(retainedTilesRoot, providerId)
+            if (rawDir.exists()) {
+                val (bytes, _) = measureDirectory(rawDir)
+                rawDir.deleteRecursively()
+                bytesDeleted += bytes
+            }
+        }
+
+        // 3. Delete database records for both canonical and raw IDs
+        database.retainedTileDao().deleteTilesByProvider(canonicalId)
+        if (canonicalId != providerId) {
+            database.retainedTileDao().deleteTilesByProvider(providerId)
+        }
+
         bytesDeleted
     }
 

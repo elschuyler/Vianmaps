@@ -544,6 +544,15 @@ fun MapCatalogueWorkspace(
                     }
                 }
                 Spacer(modifier = Modifier.height(4.dp))
+                val storageProviderDisplay = buildString {
+                    append(style.storageProviderId)
+                    if (style.rasterStorageProviderId != null) {
+                        append(" (OSM Vector) + ")
+                        append(style.rasterStorageProviderId)
+                        append(" (Satellite Imagery)")
+                    }
+                }
+                SettingsInfoRow(label = "Storage Provider", value = storageProviderDisplay)
                 SettingsInfoRow(label = "Attribution", value = style.attribution)
                 SettingsInfoRow(
                     label = "Licensing & Retention",

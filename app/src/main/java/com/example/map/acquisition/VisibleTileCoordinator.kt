@@ -144,8 +144,8 @@ class VisibleTileCoordinator(
             return
         }
 
-        // Process each visible tile
-        val providerId = styleDef.providerName.lowercase().replace(" ", "_")
+        // Process each visible tile using canonical storage provider ID
+        val providerId = styleDef.storageProviderId
         for (tile in visibleTiles) {
             // Ensure Internet is still ON
             if (!AppNetworkPolicy.isNetworkAllowed()) break

@@ -108,3 +108,30 @@ This file series is the project's permanent audit trail across sessions. Each fi
   - On-device claim only: not tested on physical hardware in this turn (verified via JVM unit test suite and compilation).
 * **Deviations from request**: None.
 * **Known issues / follow-up**: None. Ready for on-device manual QA.
+
+---
+
+### Entry 2026-11-10T17:31:00Z — Phase 3.6: Focused Storage Provider Identity Fix
+* **Summary**: Establish canonical, stable storage provider IDs (`openfreemap`, `esri_satellite`, `openaerialmap`, `maplibre_demo`, `osm_standard`), decouple visual styles from underlying providers, implement safe idempotent legacy storage migration, and ensure isolated cache clearing.
+* **Exact files touched**:
+  - `app/src/main/java/com/example/map/source/MapSourceRepository.kt` (added `StorageProviderDefinition`, `MapStorageProviders`, `resolveCanonicalProviderId`, updated `MapStyleDefinition` with `storageProviderId` and `rasterStorageProviderId`, and wired canonical IDs across all 7 map styles)
+  - `app/src/main/java/com/example/map/acquisition/VisibleTileCoordinator.kt` (updated `processVisibleCoverage` to acquire tiles under canonical `styleDef.storageProviderId`)
+  - `app/src/main/java/com/example/data/db/AppDatabase.kt` (added `getAllProviderIds()` and `getTilesByProvider()` queries to `RetainedTileDao`)
+  - `app/src/main/java/com/example/data/storage/StorageCalculationManager.kt` (implemented `migrateLegacyStorage` for on-disk directories and Room metadata, updated `calculateStorage` to audit canonical data providers, and updated `clearProviderTiles` to purge canonical and legacy folders while preserving shared OSM feature records and routing graphs)
+  - `app/src/main/java/com/example/ui/components/MapCatalogueWorkspace.kt` (updated Section 3 to display canonical storage provider identities and Section 4 to show accurate provider tile accounting)
+  - `app/src/test/java/com/example/ExampleUnitTest.kt` (added tests 21-24 covering canonical mappings, multi-style OpenFreeMap sharing, legacy migration, and safe cache clearing; all 24 passed)
+  - `BLUEPRINT.md` (updated Phase 3.6 in development phases and ledger)
+  - `receipts/RECEIPTS_002.md` (appended Phase 3.6 audit entry)
+* **What was actually done**:
+  - Traced complete provider ID flow and resolved inconsistencies where `VisibleTileCoordinator` used sanitized display names (e.g. `hybrid_(satellite_+_osm)`), `StorageCalculationManager` queried by visual style IDs (e.g. `openfreemap_liberty`), and `TileStorageManager` indexed by provider ID.
+  - Established canonical, stable storage provider IDs: `"openfreemap"` (OSM vector tiles), `"esri_satellite"` (satellite raster imagery), `"openaerialmap"` (contributed aerial imagery), `"maplibre_demo"` (diagnostic tiles), and `"osm_standard"` (fallback raster tiles).
+  - Decoupled visual styles from data providers: Liberty, Bright, Positron, and the vector layer of Hybrid all route to `"openfreemap"`. Hybrid satellite imagery routes to `"esri_satellite"`.
+  - Implemented safe, idempotent legacy storage migration in `StorageCalculationManager.migrateLegacyStorage`: recursively moves on-disk tiles from legacy directories to canonical directories, updates non-canonical Room metadata primary keys without duplicate conflicts, and purges empty legacy directories.
+  - Made provider-cache clearing surgical: `clearProviderTiles` purges only the selected provider's tile directory and Room records, leaving other providers, shared OSM feature tables (`osm_pois`, `osm_buildings`, `osm_roads`, `osm_regions`), and routing graph files completely untouched.
+  - Maintained complete MapView lifecycle integrity: left MapView instantiation, AndroidView factory/release, and lifecycle observer in `MainMapScreen.kt` completely untouched.
+* **How it was verified**:
+  - Verified local JVM unit test suite via `gradle :app:testDebugUnitTest`: 24/24 tests passed (BUILD SUCCESSFUL in 19s, 100% success rate).
+  - Verified container build via `compile_applet` tool: Build succeeded in 19s.
+  - On-device claim only: not tested on physical hardware in this turn (verified via JVM unit test suite and compilation).
+* **Deviations from request**: None.
+* **Known issues / follow-up**: None. Ready for on-device manual QA.
