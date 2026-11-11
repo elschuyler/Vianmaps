@@ -57,6 +57,7 @@
 - [x] Phase 3.5: Reduce Padding Above and Below Item Cards in Bottom Bar Popups (Tightened header-to-list spacers, inter-item card spacing, and card internal vertical padding across Settings, Maps, Places, and Tools popups).
 - [x] Phase 3.6: Focused Storage Provider Identity Fix (Separated visual map styles from underlying data providers with canonical lowercase IDs [openfreemap, esri_satellite, openaerialmap, maplibre_demo, osm_standard]; updated VisibleTileCoordinator, TileStorageManager, StorageCalculationManager, and MapCatalogueWorkspace; implemented idempotent legacy directory/Room record migration; ensured per-provider clearing strictly targets that provider without touching shared OSM features or other providers; expanded unit tests to 24/24 passing).
 - [x] Phase 3.6.1: Migration Safety & Acquisition Consistency (Hardened filesystem and Room legacy migration to be strictly loss-safe with CRC32 verification, temporary file writes, and conflict preservation; introduced StorageMigrationReport and ProviderClearResult models for complete observability; updated UI to display migration health notice; added honest acquisition status and retention policy indicators for vector vs raster providers; expanded unit tests to 32/32 passing).
+- [x] Phase 3.6.2: Migration Integrity & Storage Truthfulness (Eliminated maxOf illusion from storage accounting with transparent reconciliation of physical files vs Room records; verified physical file CRC32 during Room migration before legacy deletion; decoupled vector vs raster retention permissions with enforcement in TileStorageManager; hardened cache clearing with verified file and directory deletions; expanded unit tests to 40/40 passing).
 
 ## 5. Ledger of Changes
 - 2026-11-06: Initialized BLUEPRINT.md.
@@ -71,13 +72,16 @@
 - 2026-11-09: Completed Phase 3.4 (Main Map UI, Map Catalogue & Saved Map Compositions).
 - 2026-11-09: Completed Phase 3.5 (Bottom Bar Popup Item Card Spacing Refinement).
 - 2026-11-10: Completed Phase 3.6 (Focused Storage Provider Identity Fix).
-- 2026-11-10: Completed Phase 3.6.1 (Migration Safety & Acquisition Consistency):
-  - Hardened `StorageCalculationManager.migrateLegacyStorage`: added CRC32 checksum and length comparisons before any legacy file deletion; wrote files via `.migrating.tmp` with verified atomic renames; preserved conflicting files and reported them in `StorageMigrationReport` instead of silently overwriting or discarding data.
-  - Hardened Room entity migration: resolved primary key collisions safely, preserved canonical records, verified underlying disk files, and exposed unmigratable/missing records in `failures`.
-  - Added `StorageMigrationReport` model to `OverallStorageReport` and wired conflict banner into `MapCatalogueWorkspace.kt`.
-  - Clarified vector vs. raster acquisition boundaries: added `acquisitionPipelineStatus` and `retentionPolicyDescription` to `StorageProviderDefinition`; documented that `VisibleTileCoordinator` strictly retains OpenFreeMap vector tiles while raster layers (Esri, OAM) are rendered live by MapLibre C++ OpenGL engine with Esri offline retention restricted by its TOS.
-  - Updated `clearProviderTiles` to return structured `ProviderClearResult` and logged detailed operations in `MapViewModel.kt`.
-  - Expanded unit test suite from 24 to 32 tests in `ExampleUnitTest.kt` (covering safe identical file deduplication, content conflict preservation, corrupt target recovery, repeated migration idempotency, Room PK collision resolution, missing file failure reporting, honest raster acquisition status, and surgical provider clear with shared OSM preservation); all 32 tests passed (100% success rate).
+- 2026-11-10: Completed Phase 3.6.1 (Migration Safety & Acquisition Consistency).
+- 2026-11-11: Completed Phase 3.6.2 (Migration Integrity & Storage Truthfulness):
+  - Hardened legacy migration in `StorageCalculationManager.migrateLegacyStorage`: stream copies are explicitly flushed and synced (`fos.flush()`, `fos.fd.sync()`) before length and CRC32 verification; Room migration physically checks on-disk files and computes their CRC32 against record `checksum` (preventing deletion of legacy records when target physical files are corrupt or missing); reports `missingFiles`, `integrityFailures`, and `unresolvedDbConflicts`.
+  - Replaced the `maxOf(diskCount, dbCount)` and `maxOf(diskBytes, dbBytes)` illusion in `calculateStorage` with genuine on-disk and database reconciliation: reports `physicalFileCount`, `physicalByteSize`, `roomRecordCount`, `verifiedRecordCount`, `orphanedRecordCount`, `unindexedFileCount`, and `integrityFailureCount`.
+  - Decoupled `vectorRetentionPermitted` from `rasterRetentionPermitted` on `MapStyleDefinition` across all styles: `HYBRID_SATELLITE_OSM` allows vector retention (`true`) while raster retention remains restricted (`false`), ensuring vector overlays are saved while restricted satellite raster tiles are blocked from permanent application storage.
+  - Enforced retention permission in `TileStorageManager.saveTileData`: blocked restricted imagery or tiles marked `retentionPermission == "RESTRICTED"` from permanent disk and Room storage; flushed and synced write streams before atomic promotion.
+  - Hardened `clearProviderTiles` to verify individual file deletions, remove empty directories, verify database record deletion, and report exact deleted counts/bytes with failure notices if files remain, while preserving other providers, shared OSM feature tables (`osm_pois`, `osm_buildings`, `osm_roads`, `osm_regions`), and routing graph files.
+  - Updated `MapCatalogueWorkspace.kt` storage card to display verified file counts and reconciliation discrepancy alerts.
+  - Added unit tests 33 to 40 in `ExampleUnitTest.kt` covering corrupt file detection during Room migration, metadata string checksum matching with corrupt disk files, orphaned record and unindexed file reconciliation, integrity failure detection, retention permission blocking, hybrid vector retention authorization, truthful provider clear with OSM/routing preservation, and unknown provider clearing; all 40/40 unit tests passed (100% success rate).
+
 
 
 

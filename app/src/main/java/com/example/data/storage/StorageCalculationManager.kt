@@ -3,28 +3,39 @@ package com.example.data.storage
 import android.content.Context
 import com.example.data.db.AppDatabase
 import com.example.map.source.MapSourceRepository
+import com.example.map.source.MapStorageProviders
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.FileOutputStream
 import java.util.Locale
-
-import com.example.map.source.MapStorageProviders
 import java.util.zip.CRC32
 
 /**
  * Detailed outcome of a storage provider migration pass.
- * Exposes files/records migrated, duplicate skips, and any unresolved conflicts or failures.
+ * Exposes files/records migrated, duplicate skips, missing files, integrity failures,
+ * and any unresolved conflicts or errors.
  */
 data class StorageMigrationReport(
     val migratedFiles: Int = 0,
     val migratedDbRecords: Int = 0,
-    val skippedDuplicates: Int = 0,
+    val verifiedDuplicateFiles: Int = 0,
+    val verifiedDuplicateRecords: Int = 0,
     val unresolvedFileConflicts: List<String> = emptyList(),
     val unresolvedDbConflicts: List<String> = emptyList(),
+    val missingFiles: List<String> = emptyList(),
+    val integrityFailures: List<String> = emptyList(),
     val failures: List<String> = emptyList()
 ) {
+    val skippedDuplicates: Int
+        get() = verifiedDuplicateFiles + verifiedDuplicateRecords
+
     val isClean: Boolean
-        get() = unresolvedFileConflicts.isEmpty() && unresolvedDbConflicts.isEmpty() && failures.isEmpty()
+        get() = unresolvedFileConflicts.isEmpty() &&
+                unresolvedDbConflicts.isEmpty() &&
+                missingFiles.isEmpty() &&
+                integrityFailures.isEmpty() &&
+                failures.isEmpty()
 }
 
 /**
@@ -42,6 +53,7 @@ data class ProviderClearResult(
 
 /**
  * Storage metrics for an individual map provider / source.
+ * Fully transparent: reconciles physical disk files vs Room SQLite records.
  */
 data class SourceStorageReport(
     val providerId: String,
@@ -49,6 +61,13 @@ data class SourceStorageReport(
     val providerType: String,
     val tileCount: Int,
     val byteSize: Long,
+    val physicalFileCount: Int = tileCount,
+    val physicalByteSize: Long = byteSize,
+    val roomRecordCount: Int = tileCount,
+    val verifiedRecordCount: Int = tileCount,
+    val orphanedRecordCount: Int = 0,
+    val unindexedFileCount: Int = 0,
+    val integrityFailureCount: Int = 0,
     val formattedSize: String,
     val isDeletable: Boolean = true,
     val acquisitionStatus: String = "Active (Visible Viewport Retention)",
@@ -131,20 +150,25 @@ object StorageCalculationManager {
      *
      * Invariants enforced:
      * 1. Never deletes a legacy file until its canonical replacement is confirmed written and CRC32-verified.
-     * 2. When both legacy and canonical files exist, compares length and CRC32 checksums:
+     * 2. Flushes and syncs temporary files before verification and promotion.
+     * 3. When both legacy and canonical files exist, compares length and CRC32 checksums:
      *    - If identical: safe to remove legacy duplicate.
      *    - If canonical is empty/corrupt (0 bytes) and legacy is valid: safely replaces canonical file.
      *    - If both exist with different valid contents: preserves both, reports unresolved conflict, never deletes.
-     * 3. Atomically copies missing canonical files using temporary files (.migrating.tmp) and verified renames.
-     * 4. Resolves Room database primary key collisions without dropping valid tile records.
-     * 5. Never swallows errors; returns a structured, observable StorageMigrationReport.
+     * 4. Atomically copies missing canonical files using temporary files (.migrating.tmp) and verified renames.
+     * 5. Resolves Room database primary key collisions and verifies physical disk file checksums.
+     * 6. Never deletes a legacy Room entity until canonical destination file + Room record are both verified.
+     * 7. Never swallows errors; returns a structured, observable StorageMigrationReport.
      */
     suspend fun migrateLegacyStorage(context: Context, database: AppDatabase): StorageMigrationReport = withContext(Dispatchers.IO) {
         var migratedFiles = 0
         var migratedDbRecords = 0
-        var skippedDuplicates = 0
+        var verifiedDuplicateFiles = 0
+        var verifiedDuplicateRecords = 0
         val unresolvedFileConflicts = mutableListOf<String>()
         val unresolvedDbConflicts = mutableListOf<String>()
+        val missingFiles = mutableListOf<String>()
+        val integrityFailures = mutableListOf<String>()
         val failures = mutableListOf<String>()
 
         val retainedTilesRoot = File(context.filesDir, "retained_tiles")
@@ -170,19 +194,43 @@ object StorageCalculationManager {
                                 val targetLength = targetFile.length()
 
                                 if (targetLength == 0L && legacyLength > 0L) {
-                                    // Target file is empty/corrupt; replace safely
+                                    // Target file is empty/corrupt; replace safely via flushed temp file
                                     val tempFile = File(targetFile.parentFile, "${targetFile.name}.migrating.tmp")
-                                    legacyFile.copyTo(tempFile, overwrite = true)
-                                    val legacyCrc = computeFileCrc32(legacyFile)
-                                    val tempCrc = computeFileCrc32(tempFile)
-                                    if (legacyCrc.isNotEmpty() && legacyCrc == tempCrc) {
-                                        targetFile.delete()
-                                        tempFile.renameTo(targetFile)
-                                        legacyFile.delete()
-                                        migratedFiles++
-                                    } else {
-                                        tempFile.delete()
-                                        unresolvedFileConflicts.add("Failed replacing corrupt target for $relPath")
+                                    var writeSuccess = false
+                                    try {
+                                        FileOutputStream(tempFile).use { fos ->
+                                            legacyFile.inputStream().use { fis ->
+                                                fis.copyTo(fos)
+                                            }
+                                            fos.flush()
+                                            try { fos.fd.sync() } catch (_: Throwable) {}
+                                        }
+                                        writeSuccess = true
+                                    } catch (e: Throwable) {
+                                        failures.add("Failed copying to temp file for $relPath: ${e.message}")
+                                    }
+
+                                    if (writeSuccess) {
+                                        val legacyCrc = computeFileCrc32(legacyFile)
+                                        val tempCrc = computeFileCrc32(tempFile)
+                                        if (legacyCrc.isNotEmpty() && legacyCrc == tempCrc && tempFile.length() == legacyLength) {
+                                            targetFile.delete()
+                                            val renamed = tempFile.renameTo(targetFile)
+                                            if (!renamed) {
+                                                tempFile.copyTo(targetFile, overwrite = true)
+                                                tempFile.delete()
+                                            }
+                                            if (targetFile.exists() && computeFileCrc32(targetFile) == legacyCrc) {
+                                                legacyFile.delete()
+                                                migratedFiles++
+                                            } else {
+                                                failures.add("Target file verification failed after rename for $relPath")
+                                            }
+                                        } else {
+                                            tempFile.delete()
+                                            integrityFailures.add("CRC mismatch while replacing corrupt target for $relPath")
+                                            unresolvedFileConflicts.add("Failed replacing corrupt target for $relPath")
+                                        }
                                     }
                                 } else {
                                     // Both files exist and have data; compare CRC32 checksums
@@ -192,7 +240,7 @@ object StorageCalculationManager {
                                     if (legacyCrc.isNotEmpty() && legacyCrc == targetCrc && legacyLength == targetLength) {
                                         // Confirmed safe identical copy exists at canonical path
                                         legacyFile.delete()
-                                        skippedDuplicates++
+                                        verifiedDuplicateFiles++
                                     } else {
                                         // Content conflict: never delete legacy file blindly
                                         unresolvedFileConflicts.add(
@@ -201,28 +249,44 @@ object StorageCalculationManager {
                                     }
                                 }
                             } else {
-                                // Target does not exist; copy safely via verified temporary file
+                                // Target does not exist; copy safely via verified flushed temporary file
                                 val tempFile = File(targetFile.parentFile, "${targetFile.name}.migrating.tmp")
-                                legacyFile.copyTo(tempFile, overwrite = true)
-                                val legacyCrc = computeFileCrc32(legacyFile)
-                                val tempCrc = computeFileCrc32(tempFile)
-
-                                if (legacyCrc.isNotEmpty() && legacyCrc == tempCrc && tempFile.length() == legacyFile.length()) {
-                                    val renamed = tempFile.renameTo(targetFile)
-                                    if (!renamed) {
-                                        tempFile.copyTo(targetFile, overwrite = true)
-                                        tempFile.delete()
+                                var writeSuccess = false
+                                try {
+                                    FileOutputStream(tempFile).use { fos ->
+                                        legacyFile.inputStream().use { fis ->
+                                            fis.copyTo(fos)
+                                        }
+                                        fos.flush()
+                                        try { fos.fd.sync() } catch (_: Throwable) {}
                                     }
+                                    writeSuccess = true
+                                } catch (e: Throwable) {
+                                    failures.add("Failed copying to temp file for $relPath: ${e.message}")
+                                }
 
-                                    if (targetFile.exists() && computeFileCrc32(targetFile) == legacyCrc) {
-                                        legacyFile.delete()
-                                        migratedFiles++
+                                if (writeSuccess) {
+                                    val legacyCrc = computeFileCrc32(legacyFile)
+                                    val tempCrc = computeFileCrc32(tempFile)
+
+                                    if (legacyCrc.isNotEmpty() && legacyCrc == tempCrc && tempFile.length() == legacyFile.length()) {
+                                        val renamed = tempFile.renameTo(targetFile)
+                                        if (!renamed) {
+                                            tempFile.copyTo(targetFile, overwrite = true)
+                                            tempFile.delete()
+                                        }
+
+                                        if (targetFile.exists() && computeFileCrc32(targetFile) == legacyCrc) {
+                                            legacyFile.delete()
+                                            migratedFiles++
+                                        } else {
+                                            failures.add("Target file verification failed after rename for $relPath")
+                                        }
                                     } else {
-                                        failures.add("Target file verification failed after rename for $relPath")
+                                        tempFile.delete()
+                                        integrityFailures.add("Checksum mismatch during migration copy for $relPath")
+                                        failures.add("Checksum mismatch during migration copy for $relPath")
                                     }
-                                } else {
-                                    tempFile.delete()
-                                    failures.add("Checksum mismatch during migration copy for $relPath")
                                 }
                             }
                         } catch (e: Throwable) {
@@ -262,59 +326,117 @@ object StorageCalculationManager {
                                 File(retainedTilesRoot, "$canonicalId/${tile.category}/${tile.z}/${tile.x}/${tile.y}.bin").absolutePath
                             }
                             val canonicalFile = File(canonicalFilePath)
+                            val legacyFile = File(tile.filePath)
 
                             if (canonicalEntity != null) {
                                 // Primary key collision in Room
-                                val canonicalFileExists = File(canonicalEntity.filePath).exists()
-                                if (canonicalEntity.checksum == tile.checksum && canonicalFileExists) {
-                                    // Identical verified canonical record exists; safe to delete duplicate legacy row
+                                val canonicalPhysicalFile = File(canonicalEntity.filePath)
+                                val canonicalPhysicalExists = canonicalPhysicalFile.exists() && canonicalPhysicalFile.length() > 0
+                                val canonicalActualCrc = if (canonicalPhysicalExists) computeFileCrc32(canonicalPhysicalFile) else ""
+
+                                if (canonicalPhysicalExists && canonicalActualCrc == tile.checksum) {
+                                    // Verified matching canonical record + verified physical file exists; safe to delete duplicate legacy row
                                     database.retainedTileDao().deleteTile(legacyProviderId, tile.category, tile.z, tile.x, tile.y)
-                                    skippedDuplicates++
-                                } else if (!canonicalFileExists && canonicalFile.exists() && canonicalFile.length() > 0) {
-                                    // Canonical entity pointed to missing file, but valid file is at canonical path
-                                    val updatedCanonical = canonicalEntity.copy(
-                                        filePath = canonicalFilePath,
-                                        byteSize = canonicalFile.length(),
-                                        checksum = tile.checksum
-                                    )
-                                    database.retainedTileDao().insertTile(updatedCanonical)
-                                    database.retainedTileDao().deleteTile(legacyProviderId, tile.category, tile.z, tile.x, tile.y)
-                                    migratedDbRecords++
+                                    verifiedDuplicateRecords++
+                                } else if (!canonicalPhysicalExists && canonicalFile.exists() && canonicalFile.length() > 0) {
+                                    val targetCrc = computeFileCrc32(canonicalFile)
+                                    if (targetCrc == tile.checksum) {
+                                        // Canonical entity pointed to missing file, but valid file is at canonical path
+                                        val updatedCanonical = canonicalEntity.copy(
+                                            filePath = canonicalFilePath,
+                                            byteSize = canonicalFile.length(),
+                                            checksum = tile.checksum
+                                        )
+                                        database.retainedTileDao().insertTile(updatedCanonical)
+                                        database.retainedTileDao().deleteTile(legacyProviderId, tile.category, tile.z, tile.x, tile.y)
+                                        migratedDbRecords++
+                                    } else {
+                                        integrityFailures.add("Integrity mismatch for recovered canonical file at $canonicalFilePath")
+                                        unresolvedDbConflicts.add("DB collision with corrupt target for $canonicalId/${tile.category}/${tile.z}/${tile.x}/${tile.y}")
+                                    }
+                                } else if (canonicalPhysicalExists && canonicalActualCrc != tile.checksum) {
+                                    // Physical file is corrupt or has different content than legacy record
+                                    integrityFailures.add("Canonical physical file checksum mismatch for $canonicalId/${tile.category}/${tile.z}/${tile.x}/${tile.y}")
+                                    unresolvedDbConflicts.add("DB collision with checksum mismatch at $canonicalId/${tile.category}/${tile.z}/${tile.x}/${tile.y}")
                                 } else {
-                                    // Content or metadata collision; preserve legacy row and report
-                                    unresolvedDbConflicts.add(
-                                        "DB collision at $canonicalId/${tile.category}/${tile.z}/${tile.x}/${tile.y}"
-                                    )
+                                    missingFiles.add("Missing physical file for canonical tile record $canonicalId/${tile.category}/${tile.z}/${tile.x}/${tile.y}")
+                                    unresolvedDbConflicts.add("DB collision at $canonicalId/${tile.category}/${tile.z}/${tile.x}/${tile.y}")
                                 }
                             } else {
                                 // Canonical entity does not exist yet
                                 if (canonicalFile.exists() && canonicalFile.length() > 0) {
-                                    val newEntity = tile.copy(
-                                        providerId = canonicalId,
-                                        filePath = canonicalFilePath,
-                                        byteSize = canonicalFile.length()
-                                    )
-                                    database.retainedTileDao().insertTile(newEntity)
-                                    database.retainedTileDao().deleteTile(legacyProviderId, tile.category, tile.z, tile.x, tile.y)
-                                    migratedDbRecords++
-                                } else if (File(tile.filePath).exists() && File(tile.filePath).length() > 0) {
+                                    val canonicalCrc = computeFileCrc32(canonicalFile)
+                                    if (canonicalCrc == tile.checksum) {
+                                        val newEntity = tile.copy(
+                                            providerId = canonicalId,
+                                            filePath = canonicalFilePath,
+                                            byteSize = canonicalFile.length()
+                                        )
+                                        database.retainedTileDao().insertTile(newEntity)
+                                        val verifiedInserted = database.retainedTileDao().getTile(canonicalId, tile.category, tile.z, tile.x, tile.y) != null
+                                        if (verifiedInserted) {
+                                            database.retainedTileDao().deleteTile(legacyProviderId, tile.category, tile.z, tile.x, tile.y)
+                                            migratedDbRecords++
+                                        } else {
+                                            failures.add("Failed to verify insertion of canonical record in DB")
+                                        }
+                                    } else {
+                                        integrityFailures.add("Integrity failure: canonical file CRC ($canonicalCrc) != record checksum (${tile.checksum}) for $canonicalId/${tile.category}/${tile.z}/${tile.x}/${tile.y}")
+                                    }
+                                } else if (legacyFile.exists() && legacyFile.length() > 0) {
                                     // Legacy file exists; copy to canonical path before migrating Room record
-                                    val legacyFile = File(tile.filePath)
-                                    canonicalFile.parentFile?.mkdirs()
-                                    legacyFile.copyTo(canonicalFile, overwrite = true)
-                                    val newEntity = tile.copy(
-                                        providerId = canonicalId,
-                                        filePath = canonicalFilePath,
-                                        byteSize = canonicalFile.length()
-                                    )
-                                    database.retainedTileDao().insertTile(newEntity)
-                                    database.retainedTileDao().deleteTile(legacyProviderId, tile.category, tile.z, tile.x, tile.y)
-                                    legacyFile.delete()
-                                    migratedDbRecords++
+                                    val legacyCrc = computeFileCrc32(legacyFile)
+                                    if (legacyCrc == tile.checksum) {
+                                        canonicalFile.parentFile?.mkdirs()
+                                        val tempFile = File(canonicalFile.parentFile, "${canonicalFile.name}.migrating.tmp")
+                                        var writeOk = false
+                                        try {
+                                            FileOutputStream(tempFile).use { fos ->
+                                                legacyFile.inputStream().use { fis -> fis.copyTo(fos) }
+                                                fos.flush()
+                                                try { fos.fd.sync() } catch (_: Throwable) {}
+                                            }
+                                            writeOk = true
+                                        } catch (e: Throwable) {
+                                            failures.add("Failed copying legacy file to temp: ${e.message}")
+                                        }
+
+                                        if (writeOk && computeFileCrc32(tempFile) == legacyCrc && tempFile.length() == legacyFile.length()) {
+                                            if (canonicalFile.exists()) canonicalFile.delete()
+                                            val renamed = tempFile.renameTo(canonicalFile)
+                                            if (!renamed) {
+                                                tempFile.copyTo(canonicalFile, overwrite = true)
+                                                tempFile.delete()
+                                            }
+
+                                            if (canonicalFile.exists() && computeFileCrc32(canonicalFile) == legacyCrc) {
+                                                val newEntity = tile.copy(
+                                                    providerId = canonicalId,
+                                                    filePath = canonicalFilePath,
+                                                    byteSize = canonicalFile.length()
+                                                )
+                                                database.retainedTileDao().insertTile(newEntity)
+                                                val verifiedInserted = database.retainedTileDao().getTile(canonicalId, tile.category, tile.z, tile.x, tile.y) != null
+                                                if (verifiedInserted) {
+                                                    database.retainedTileDao().deleteTile(legacyProviderId, tile.category, tile.z, tile.x, tile.y)
+                                                    legacyFile.delete()
+                                                    migratedDbRecords++
+                                                } else {
+                                                    failures.add("Failed to verify insertion of canonical record in DB")
+                                                }
+                                            } else {
+                                                failures.add("Canonical file verification failed after rename for $canonicalFilePath")
+                                            }
+                                        } else {
+                                            tempFile.delete()
+                                            integrityFailures.add("Checksum mismatch during legacy file copy for ${legacyFile.path}")
+                                        }
+                                    } else {
+                                        integrityFailures.add("Integrity failure: legacy file CRC ($legacyCrc) != record checksum (${tile.checksum}) for $legacyProviderId/${tile.category}/${tile.z}/${tile.x}/${tile.y}")
+                                    }
                                 } else {
-                                    failures.add(
-                                        "Missing file for tile record $legacyProviderId/${tile.category}/${tile.z}/${tile.x}/${tile.y}"
-                                    )
+                                    missingFiles.add("Missing physical file for tile record $legacyProviderId/${tile.category}/${tile.z}/${tile.x}/${tile.y}")
+                                    failures.add("Missing file for tile record $legacyProviderId/${tile.category}/${tile.z}/${tile.x}/${tile.y}")
                                 }
                             }
                         } catch (e: Throwable) {
@@ -330,9 +452,12 @@ object StorageCalculationManager {
         StorageMigrationReport(
             migratedFiles = migratedFiles,
             migratedDbRecords = migratedDbRecords,
-            skippedDuplicates = skippedDuplicates,
+            verifiedDuplicateFiles = verifiedDuplicateFiles,
+            verifiedDuplicateRecords = verifiedDuplicateRecords,
             unresolvedFileConflicts = unresolvedFileConflicts,
             unresolvedDbConflicts = unresolvedDbConflicts,
+            missingFiles = missingFiles,
+            integrityFailures = integrityFailures,
             failures = failures
         )
     }
@@ -343,7 +468,7 @@ object StorageCalculationManager {
 
         val retainedTilesRoot = File(context.filesDir, "retained_tiles")
 
-        // 1. Audit retained tile files per canonical data provider
+        // 1. Audit retained tile files per canonical data provider using real reconciliation (no maxOf illusion)
         val providerReports = mutableListOf<SourceStorageReport>()
         val canonicalProviders = MapStorageProviders.allProviders
 
@@ -351,28 +476,59 @@ object StorageCalculationManager {
 
         for (provider in canonicalProviders) {
             val providerDir = File(retainedTilesRoot, provider.id)
-            val (diskBytes, diskCount) = measureDirectory(providerDir)
+            val physicalFiles = if (providerDir.exists() && providerDir.isDirectory) {
+                providerDir.walkTopDown().filter { it.isFile && !it.name.endsWith(".tmp") }.toList()
+            } else {
+                emptyList()
+            }
+            val physicalFileCount = physicalFiles.size
+            val physicalByteSize = physicalFiles.sumOf { it.length() }
 
-            // Reconcile with database if available
-            val dbCount = database.retainedTileDao().getTileCountByProvider(provider.id)
-            val dbBytes = database.retainedTileDao().getBytesByProvider(provider.id) ?: 0L
+            val roomTiles = database.retainedTileDao().getTilesByProvider(provider.id)
+            val roomRecordCount = roomTiles.size
 
-            val reportedCount = maxOf(diskCount, dbCount)
-            val reportedBytes = maxOf(diskBytes, dbBytes)
-            totalTileBytes += reportedBytes
+            var verifiedRecordCount = 0
+            var orphanedRecordCount = 0
+            var integrityFailureCount = 0
+
+            for (tile in roomTiles) {
+                val file = File(tile.filePath)
+                if (!file.exists() || !file.isFile || file.length() == 0L) {
+                    orphanedRecordCount++
+                } else {
+                    val fileCrc = computeFileCrc32(file)
+                    if (fileCrc.isNotEmpty() && fileCrc == tile.checksum) {
+                        verifiedRecordCount++
+                    } else {
+                        integrityFailureCount++
+                    }
+                }
+            }
+
+            val roomPathSet = roomTiles.map { it.filePath }.toSet()
+            val unindexedFileCount = physicalFiles.count { !roomPathSet.contains(it.absolutePath) }
+
+            totalTileBytes += physicalByteSize
 
             providerReports.add(
                 SourceStorageReport(
                     providerId = provider.id,
                     providerName = provider.displayName,
                     providerType = provider.providerTypeDescription,
-                    tileCount = reportedCount,
-                    byteSize = reportedBytes,
-                    formattedSize = formatBytes(reportedBytes),
-                    isDeletable = reportedCount > 0,
+                    tileCount = physicalFileCount,
+                    byteSize = physicalByteSize,
+                    physicalFileCount = physicalFileCount,
+                    physicalByteSize = physicalByteSize,
+                    roomRecordCount = roomRecordCount,
+                    verifiedRecordCount = verifiedRecordCount,
+                    orphanedRecordCount = orphanedRecordCount,
+                    unindexedFileCount = unindexedFileCount,
+                    integrityFailureCount = integrityFailureCount,
+                    formattedSize = formatBytes(physicalByteSize),
+                    isDeletable = physicalFileCount > 0 || roomRecordCount > 0,
                     acquisitionStatus = provider.acquisitionPipelineStatus,
                     retentionPolicy = provider.retentionPolicyDescription,
-                    isOfflineRetained = reportedCount > 0
+                    isOfflineRetained = physicalFileCount > 0 && verifiedRecordCount > 0
                 )
             )
         }
@@ -385,7 +541,9 @@ object StorageCalculationManager {
             } ?: emptyList()
 
             for (dir in unlistedDirs) {
-                val (uBytes, uCount) = measureDirectory(dir)
+                val uFiles = dir.walkTopDown().filter { it.isFile && !it.name.endsWith(".tmp") }.toList()
+                val uBytes = uFiles.sumOf { it.length() }
+                val uCount = uFiles.size
                 if (uCount > 0 || uBytes > 0) {
                     totalTileBytes += uBytes
                     providerReports.add(
@@ -395,11 +553,18 @@ object StorageCalculationManager {
                             providerType = "Cached Tiles",
                             tileCount = uCount,
                             byteSize = uBytes,
+                            physicalFileCount = uCount,
+                            physicalByteSize = uBytes,
+                            roomRecordCount = 0,
+                            verifiedRecordCount = 0,
+                            orphanedRecordCount = 0,
+                            unindexedFileCount = uCount,
+                            integrityFailureCount = 0,
                             formattedSize = formatBytes(uBytes),
                             isDeletable = true,
                             acquisitionStatus = "Uncatalogued Cached Data",
                             retentionPolicy = "Unknown",
-                            isOfflineRetained = uCount > 0
+                            isOfflineRetained = false
                         )
                     )
                 }
@@ -440,7 +605,7 @@ object StorageCalculationManager {
             status = if (downloadedRoutingTiles > 0) "$downloadedRoutingTiles graph tiles active" else "Not configured (0 bytes)"
         )
 
-        // 4. Overall total
+        // 4. Overall total - truthful physical byte sum
         val totalBytes = totalTileBytes + dbBytes + routingBytes
 
         OverallStorageReport(
@@ -458,6 +623,7 @@ object StorageCalculationManager {
      * Safely and surgically purges cached tiles for a specific provider from disk and database,
      * guaranteeing zero deletion or modification of other providers, shared OSM feature records
      * (osm_pois, osm_buildings, osm_roads, osm_regions), or routing graph files.
+     * Reports exact physical file deletion results and verifies database state.
      */
     suspend fun clearProviderTiles(context: Context, database: AppDatabase, providerId: String): ProviderClearResult = withContext(Dispatchers.IO) {
         val canonicalId = MapSourceRepository.resolveCanonicalProviderId(providerId)
@@ -466,26 +632,46 @@ object StorageCalculationManager {
         var bytesDeleted = 0L
         var filesDeleted = 0
         var recordsDeleted = 0
+        var isSuccess = true
+        var failureReason: String? = null
+
+        fun purgeDir(dir: File) {
+            if (!dir.exists() || !dir.isDirectory) return
+            val files = dir.walkBottomUp().filter { it.isFile }.toList()
+            for (f in files) {
+                val len = f.length()
+                val deleted = f.delete()
+                if (deleted) {
+                    bytesDeleted += len
+                    filesDeleted++
+                } else {
+                    isSuccess = false
+                    failureReason = "Failed to delete file ${f.path}"
+                }
+            }
+            // Delete empty subdirectories bottom up
+            dir.walkBottomUp().filter { it.isDirectory && it != dir }.forEach { subDir ->
+                subDir.delete()
+            }
+            dir.delete()
+            if (dir.exists()) {
+                val remaining = dir.walkTopDown().filter { it.isFile }.count()
+                if (remaining > 0) {
+                    isSuccess = false
+                    failureReason = "Failed to remove directory ${dir.path} ($remaining files remaining)"
+                }
+            }
+        }
 
         try {
             // 1. Purge canonical folder
             val canonicalDir = File(retainedTilesRoot, canonicalId)
-            if (canonicalDir.exists()) {
-                val (bytes, count) = measureDirectory(canonicalDir)
-                canonicalDir.deleteRecursively()
-                bytesDeleted += bytes
-                filesDeleted += count
-            }
+            purgeDir(canonicalDir)
 
             // 2. Also purge legacy folder if different
             if (canonicalId != providerId) {
                 val rawDir = File(retainedTilesRoot, providerId)
-                if (rawDir.exists()) {
-                    val (bytes, count) = measureDirectory(rawDir)
-                    rawDir.deleteRecursively()
-                    bytesDeleted += bytes
-                    filesDeleted += count
-                }
+                purgeDir(rawDir)
             }
 
             // 3. Delete tile metadata records for this provider only
@@ -494,13 +680,21 @@ object StorageCalculationManager {
                 recordsDeleted += database.retainedTileDao().deleteTilesByProvider(providerId)
             }
 
+            // Verify Room deletion
+            val remainingRecords = database.retainedTileDao().getTileCountByProvider(canonicalId)
+            if (remainingRecords > 0) {
+                isSuccess = false
+                failureReason = "$remainingRecords database records could not be deleted"
+            }
+
             ProviderClearResult(
                 providerId = providerId,
                 canonicalId = canonicalId,
                 bytesDeleted = bytesDeleted,
                 filesDeleted = filesDeleted,
                 recordsDeleted = recordsDeleted,
-                isSuccess = true
+                isSuccess = isSuccess,
+                error = failureReason
             )
         } catch (e: Throwable) {
             ProviderClearResult(
@@ -529,7 +723,7 @@ object StorageCalculationManager {
             for (file in files) {
                 if (file.isDirectory) {
                     stack.add(file)
-                } else {
+                } else if (!file.name.endsWith(".tmp")) {
                     totalBytes += file.length()
                     totalCount++
                 }

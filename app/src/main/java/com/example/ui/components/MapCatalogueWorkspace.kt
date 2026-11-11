@@ -690,10 +690,26 @@ fun MapCatalogueWorkspace(
                         Column(modifier = Modifier.weight(1f)) {
                             Text(src.providerName, fontSize = 13.sp, fontWeight = FontWeight.Bold, color = TextDarkPrimary)
                             Text(
-                                text = "${src.tileCount} tiles retained • ${src.formattedSize}",
+                                text = if (src.physicalFileCount > 0) {
+                                    "${src.physicalFileCount} files (${src.verifiedRecordCount} verified) • ${src.formattedSize}"
+                                } else {
+                                    "0 files • 0 B"
+                                },
                                 fontSize = 11.sp,
-                                color = if (src.tileCount > 0) SkyBlueDim else TextDarkMuted
+                                color = if (src.physicalFileCount > 0) SkyBlueDim else TextDarkMuted
                             )
+                            if (src.orphanedRecordCount > 0 || src.integrityFailureCount > 0 || src.unindexedFileCount > 0) {
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = "Discrepancy: " + listOfNotNull(
+                                        if (src.orphanedRecordCount > 0) "${src.orphanedRecordCount} orphaned DB records" else null,
+                                        if (src.integrityFailureCount > 0) "${src.integrityFailureCount} integrity mismatches" else null,
+                                        if (src.unindexedFileCount > 0) "${src.unindexedFileCount} unindexed files" else null
+                                    ).joinToString(", "),
+                                    fontSize = 9.5.sp,
+                                    color = IndicatorAlert
+                                )
+                            }
                             Spacer(modifier = Modifier.height(2.dp))
                             Text(
                                 text = "${src.acquisitionStatus} • Retention: ${src.retentionPolicy}",
@@ -701,7 +717,7 @@ fun MapCatalogueWorkspace(
                                 color = TextDarkSecondary
                             )
                         }
-                        if (src.tileCount > 0) {
+                        if (src.physicalFileCount > 0 || src.roomRecordCount > 0) {
                             OutlinedButton(
                                 onClick = { pendingClearProviderId = src.providerId },
                                 modifier = Modifier.height(28.dp),

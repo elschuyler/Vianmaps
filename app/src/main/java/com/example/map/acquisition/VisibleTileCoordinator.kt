@@ -212,7 +212,7 @@ class VisibleTileCoordinator(
                                 byteSize = bodyBytes.size.toLong(),
                                 sourceUrl = tileUrl,
                                 attribution = styleDef.attribution,
-                                retentionPermission = if (styleDef.offlineRetentionPermitted) "PERMITTED" else "RESTRICTED"
+                                retentionPermission = if (styleDef.vectorRetentionPermitted) "PERMITTED" else "RESTRICTED"
                             )
 
                             // Save to durable file storage and sync with Room & MapLibre OfflineManager

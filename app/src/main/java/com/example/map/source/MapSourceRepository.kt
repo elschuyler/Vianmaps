@@ -21,6 +21,8 @@ data class MapStyleDefinition(
     val rasterMinZoom: Float = 0f,
     val rasterMaxZoom: Float = 19f,
     val offlineRetentionPermitted: Boolean = true,
+    val vectorRetentionPermitted: Boolean = true,
+    val rasterRetentionPermitted: Boolean = false,
     val vectorTileUrlTemplate: String = "https://tiles.openfreemap.org/planet/20261101_080013_pt/{z}/{x}/{y}.pbf",
     val storageProviderId: String = MapStorageProviders.OPEN_FREE_MAP.id,
     val rasterStorageProviderId: String? = null
@@ -158,6 +160,8 @@ object MapSourceRepository {
         rasterMinZoom = 0f,
         rasterMaxZoom = 19f,
         offlineRetentionPermitted = false, // Raster imagery is online/cache only; OSM vector data is retained
+        vectorRetentionPermitted = true,
+        rasterRetentionPermitted = false,
         storageProviderId = MapStorageProviders.OPEN_FREE_MAP.id,
         rasterStorageProviderId = MapStorageProviders.ESRI_SATELLITE.id
     )
@@ -176,6 +180,8 @@ object MapSourceRepository {
         rasterMinZoom = 14f,
         rasterMaxZoom = 19f,
         offlineRetentionPermitted = true,
+        vectorRetentionPermitted = true,
+        rasterRetentionPermitted = true,
         storageProviderId = MapStorageProviders.OPEN_FREE_MAP.id,
         rasterStorageProviderId = MapStorageProviders.OPEN_AERIAL_MAP.id
     )
@@ -191,6 +197,8 @@ object MapSourceRepository {
         licenseNotes = "OpenFreeMap free vector tiles. Vector data retained for offline viewing.",
         isCompositeHybrid = false,
         offlineRetentionPermitted = true,
+        vectorRetentionPermitted = true,
+        rasterRetentionPermitted = false,
         storageProviderId = MapStorageProviders.OPEN_FREE_MAP.id,
         rasterStorageProviderId = null
     )
@@ -206,6 +214,8 @@ object MapSourceRepository {
         licenseNotes = "OpenFreeMap bright style. OpenStreetMap data under ODbL.",
         isCompositeHybrid = false,
         offlineRetentionPermitted = true,
+        vectorRetentionPermitted = true,
+        rasterRetentionPermitted = false,
         storageProviderId = MapStorageProviders.OPEN_FREE_MAP.id,
         rasterStorageProviderId = null
     )
@@ -221,6 +231,8 @@ object MapSourceRepository {
         licenseNotes = "OpenFreeMap positron muted vector style.",
         isCompositeHybrid = false,
         offlineRetentionPermitted = true,
+        vectorRetentionPermitted = true,
+        rasterRetentionPermitted = false,
         storageProviderId = MapStorageProviders.OPEN_FREE_MAP.id,
         rasterStorageProviderId = null
     )
@@ -236,6 +248,8 @@ object MapSourceRepository {
         licenseNotes = "Temporary lightweight diagnostic style used for engine rendering verification.",
         isCompositeHybrid = false,
         offlineRetentionPermitted = false,
+        vectorRetentionPermitted = false,
+        rasterRetentionPermitted = false,
         storageProviderId = MapStorageProviders.MAPLIBRE_DEMO.id,
         rasterStorageProviderId = null
     )
@@ -251,6 +265,8 @@ object MapSourceRepository {
         licenseNotes = "Standard OSM raster tile fallback. Subject to OSM tile usage policies.",
         isCompositeHybrid = false,
         offlineRetentionPermitted = false,
+        vectorRetentionPermitted = false,
+        rasterRetentionPermitted = false,
         storageProviderId = MapStorageProviders.OSM_STANDARD.id,
         rasterStorageProviderId = null
     )

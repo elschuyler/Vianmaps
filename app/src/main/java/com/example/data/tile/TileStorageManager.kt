@@ -5,6 +5,8 @@ import com.example.data.db.AppDatabase
 import com.example.data.db.RetainedTileEntity
 import com.example.diagnostics.DiagnosticRepository
 import com.example.diagnostics.LogSeverity
+import com.example.map.source.MapSourceRepository
+import com.example.map.source.MapStorageProviders
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.maplibre.android.offline.OfflineManager
@@ -139,6 +141,21 @@ class TileStorageManager(private val context: Context) {
         data: ByteArray,
         metadata: TileMetadata
     ): Boolean = withContext(Dispatchers.IO) {
+        // Enforce retention permission and provider retention policy
+        val canonicalProviderId = MapSourceRepository.resolveCanonicalProviderId(providerId)
+        val providerDef = MapStorageProviders.getProviderById(canonicalProviderId)
+        val isPermanentlyRetainable = (metadata.retentionPermission == "PERMITTED" || metadata.retentionPermission.isEmpty()) &&
+                (providerDef == null || providerDef.defaultRetentionPermitted)
+        if (!isPermanentlyRetainable) {
+            DiagnosticRepository.log(
+                severity = LogSeverity.INFO,
+                source = "TileStorageManager",
+                description = "Permanent offline retention blocked for restricted tile (provider: $providerId, category: $category, permission: ${metadata.retentionPermission}).",
+                stage = "TILE_RETENTION_BLOCKED"
+            )
+            return@withContext false
+        }
+
         val targetFile = getTileFile(providerId, category, z, x, y)
         val tempFile = File(targetFile.parentFile, "${targetFile.name}.tmp")
         try {
@@ -147,16 +164,27 @@ class TileStorageManager(private val context: Context) {
             crc.update(data)
             val checksum = crc.value.toString(16)
 
-            // Atomic file write
+            // Safe, verified file write with flush and sync
             FileOutputStream(tempFile).use { fos ->
                 fos.write(data)
                 fos.flush()
+                try { fos.fd.sync() } catch (_: Throwable) {}
             }
+
+            if (tempFile.length() != data.size.toLong()) {
+                tempFile.delete()
+                return@withContext false
+            }
+
             if (targetFile.exists()) targetFile.delete()
             val renamed = tempFile.renameTo(targetFile)
             if (!renamed) {
                 tempFile.copyTo(targetFile, overwrite = true)
                 tempFile.delete()
+            }
+
+            if (!targetFile.exists() || targetFile.length() != data.size.toLong()) {
+                return@withContext false
             }
 
             // Sync with Room Database

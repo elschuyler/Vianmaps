@@ -165,3 +165,38 @@ This file series is the project's permanent audit trail across sessions. Each fi
   - On-device claim only: not tested on physical hardware in this turn (verified via JVM unit test suite and compilation).
 * **Deviations from request**: None.
 * **Known issues / follow-up**: None. Ready for on-device manual QA.
+---
+
+### Entry 2026-11-11T20:26:00Z — Phase 3.6.2: Migration Integrity & Storage Truthfulness
+* **Summary**: Harden migration loss-safety with stream flush/sync and physical disk CRC32 validation; eliminate maxOf illusion from storage accounting with truthful on-disk and Room reconciliation; decouple vector vs. raster retention permissions and enforce in TileStorageManager; verify file/directory deletions in provider cache clearing.
+* **Exact files touched**:
+  - `app/src/main/java/com/example/map/source/MapSourceRepository.kt` (added decoupled `vectorRetentionPermitted` and `rasterRetentionPermitted` to `MapStyleDefinition`; configured `HYBRID_SATELLITE_OSM` with permitted vector retention and restricted raster retention; configured across all 7 map styles)
+  - `app/src/main/java/com/example/map/acquisition/VisibleTileCoordinator.kt` (wired vector acquisition retention permission to `styleDef.vectorRetentionPermitted`)
+  - `app/src/main/java/com/example/data/tile/TileStorageManager.kt` (enforced retention permission and provider default policy gate in `saveTileData`, blocking restricted tiles from disk/Room; flushed and synced write streams before atomic promotion)
+  - `app/src/main/java/com/example/data/storage/StorageCalculationManager.kt` (flushed and synced file copy streams before promotion; verified physical file existence and CRC32 against Room `checksum` in `migrateLegacyStorage`; expanded `StorageMigrationReport` with `missingFiles` and `integrityFailures`; eliminated `maxOf` illusion in `calculateStorage` with transparent reconciliation reporting `physicalFileCount`, `physicalByteSize`, `roomRecordCount`, `verifiedRecordCount`, `orphanedRecordCount`, `unindexedFileCount`, and `integrityFailureCount`; hardened `clearProviderTiles` to verify individual file deletions, remove empty directories, and verify Room deletion while preserving shared OSM feature tables and routing graphs)
+  - `app/src/main/java/com/example/data/db/AppDatabase.kt` (added `clearAllPois()` query to `OsmPoiDao`)
+  - `app/src/main/java/com/example/ui/components/MapCatalogueWorkspace.kt` (updated Section 4 storage cards to display verified tile counts and reconciliation discrepancy notices)
+  - `app/src/test/java/com/example/ExampleUnitTest.kt` (added tests 33 to 40 covering physical CRC validation during Room migration, metadata string matching with corrupt disk files, orphaned record and unindexed file reconciliation, integrity failure detection in storage reports, restricted tile retention blocking, hybrid vector retention authorization, truthful provider clear with OSM and routing preservation, and unknown provider clearing; all 40/40 tests passed)
+  - `BLUEPRINT.md` (updated Phase 3.6.2 in development phases and ledger)
+  - `receipts/RECEIPTS_002.md` (appended Phase 3.6.2 audit entry)
+* **What was actually done**:
+  - Migration stream flush & sync: In `StorageCalculationManager.migrateLegacyStorage`, file copy streams now call `fos.flush()` and `fos.fd.sync()` before length and CRC32 verification. Temporary files (`.migrating.tmp`) are verified before atomic replacement of the canonical destination.
+  - Physical file CRC32 verification in Room migration: Room migration no longer assumes matching string checksums guarantee disk integrity. It computes the actual CRC32 of the physical file on disk:
+    * If physical file CRC32 matches `tile.checksum`, canonical record is verified and duplicate legacy row is deleted.
+    * If physical file is corrupt or has mismatched CRC32, migration records an `integrityFailure` and `unresolvedDbConflict` and preserves the legacy row.
+    * If physical file is missing from disk, it records a `missingFile` error and preserves the legacy row.
+  - Truthful storage reconciliation: Replaced `maxOf(diskCount, dbCount)` and `maxOf(diskBytes, dbBytes)` with honest physical file and database reconciliation per provider:
+    * Scans actual physical files on disk: `physicalFileCount`, `physicalByteSize`.
+    * Queries Room records: `roomRecordCount`.
+    * Reconciles: `verifiedRecordCount` (record whose file exists and file CRC32 matches record checksum), `orphanedRecordCount` (Room record with no physical file), `unindexedFileCount` (physical file with no Room record), and `integrityFailureCount` (physical file CRC32 differs from record checksum).
+    * Total tile storage is the sum of actual physical bytes on disk.
+  - Decoupled retention permissions: Separated `vectorRetentionPermitted` from `rasterRetentionPermitted` on `MapStyleDefinition`. On composite `HYBRID_SATELLITE_OSM`, vector retention is `true` (OpenFreeMap ODbL data is retained) while raster retention is `false` (Esri satellite imagery is restricted to live rendering only).
+  - Retention enforcement: In `TileStorageManager.saveTileData`, added pre-retention permission check. If `retentionPermission == "RESTRICTED"` or provider default policy is restricted, retention is blocked and returns `false` without writing to disk or Room.
+  - Truthful cache clearing: In `clearProviderTiles`, each file deletion is verified, directory removal is verified, and database deletion is checked. Returns exact deleted counts and bytes, flagging errors if files remain, while guaranteeing zero deletion of other providers, shared OSM feature records (`osm_pois`, `osm_buildings`, `osm_roads`, `osm_regions`), or routing graph files.
+  - Maintained complete MapView lifecycle integrity: left MapView instantiation, AndroidView factory/release, and lifecycle observer in `MainMapScreen.kt` completely untouched.
+* **How it was verified**:
+  - Verified local JVM unit test suite via `gradle :app:testDebugUnitTest`: all 40/40 tests passed (BUILD SUCCESSFUL in 24s, 100% success rate).
+  - Verified container build via `compile_applet` tool: Build succeeded.
+  - On-device claim only: not tested on physical hardware in this turn (verified via JVM unit test suite and compilation).
+* **Deviations from request**: None.
+* **Known issues / follow-up**: None. Ready for on-device manual QA.

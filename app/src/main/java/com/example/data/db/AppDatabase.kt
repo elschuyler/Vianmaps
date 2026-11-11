@@ -110,6 +110,9 @@ interface OsmPoiDao {
 
     @Query("SELECT * FROM osm_pois ORDER BY name ASC LIMIT :limit")
     suspend fun getAllPois(limit: Int = 100): List<OsmPoiRecord>
+
+    @Query("DELETE FROM osm_pois")
+    suspend fun clearAllPois()
 }
 
 @Entity(tableName = "osm_buildings")

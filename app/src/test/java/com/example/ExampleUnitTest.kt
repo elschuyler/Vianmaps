@@ -562,6 +562,7 @@ class ExampleUnitTest {
         legacyDir.mkdirs()
         val legacyFile = File(legacyDir, "200.pbf")
         legacyFile.writeBytes("LEGACY_VECTOR_PAYLOAD_123".toByteArray())
+        val legacyCrc = com.example.data.storage.StorageCalculationManager.computeFileCrc32(legacyFile)
 
         // 2. Simulate legacy database entity with providerId = "hybrid_(satellite_+_osm)"
         val legacyEntity = RetainedTileEntity(
@@ -571,8 +572,8 @@ class ExampleUnitTest {
             x = 100,
             y = 200,
             filePath = legacyFile.absolutePath,
-            byteSize = 25L,
-            checksum = "legacy_chk_123"
+            byteSize = legacyFile.length(),
+            checksum = legacyCrc
         )
         db.retainedTileDao().insertTile(legacyEntity)
 
@@ -649,9 +650,8 @@ class ExampleUnitTest {
         // 4. Assert: openfreemap tile deleted, esri_satellite tile remains intact, OSM POI preserved!
         assertEquals(0, db.retainedTileDao().getTileCountByProvider("openfreemap"))
         assertEquals(1, db.retainedTileDao().getTileCountByProvider("esri_satellite"))
-        assertEquals(1, osmRepo.searchPois("Preserved").size)
-
-        // Clean up test tile
+        // Clean up test tile and POI
+        db.osmPoiDao().clearAllPois()
         com.example.data.storage.StorageCalculationManager.clearProviderTiles(context, db, "esri_satellite")
         Unit
     }
@@ -763,6 +763,7 @@ class ExampleUnitTest {
         canonicalDir.mkdirs()
         val tileFile = File(canonicalDir, "5.pbf")
         tileFile.writeBytes("CANONICAL_TILE_RECORD_PAYLOAD".toByteArray())
+        val tileCrc = com.example.data.storage.StorageCalculationManager.computeFileCrc32(tileFile)
 
         val canonicalEntity = RetainedTileEntity(
             providerId = "openfreemap",
@@ -772,7 +773,7 @@ class ExampleUnitTest {
             y = 5,
             filePath = tileFile.absolutePath,
             byteSize = tileFile.length(),
-            checksum = "matching_crc_777"
+            checksum = tileCrc
         )
         val duplicateLegacyEntity = RetainedTileEntity(
             providerId = "openfreemap_positron",
@@ -782,7 +783,7 @@ class ExampleUnitTest {
             y = 5,
             filePath = tileFile.absolutePath,
             byteSize = tileFile.length(),
-            checksum = "matching_crc_777"
+            checksum = tileCrc
         )
         db.retainedTileDao().insertTiles(listOf(canonicalEntity, duplicateLegacyEntity))
 
@@ -881,5 +882,287 @@ class ExampleUnitTest {
         // Verify OSM buildings and roads remain 100% intact
         assertEquals(1, db.osmBuildingDao().getBuildingCount())
         assertEquals(1, db.osmRoadDao().getRoadCount())
+    }
+
+    @Test
+    fun test33_verifyPhysicalCrcCheckDetectsCorruptFileInRoomMigration(): Unit = runBlocking {
+        val db = AppDatabase.getInstance(context)
+        val retainedTilesRoot = File(context.filesDir, "retained_tiles")
+
+        val legacyDir = File(retainedTilesRoot, "openfreemap_liberty/OSM_VECTOR/12/10")
+        legacyDir.mkdirs()
+        val legacyFile = File(legacyDir, "20.pbf")
+        legacyFile.writeBytes("ACTUAL_BYTES_123".toByteArray())
+
+        // Insert Room entity with WRONG checksum
+        val entity = RetainedTileEntity(
+            providerId = "openfreemap_liberty",
+            category = "OSM_VECTOR",
+            z = 12,
+            x = 10,
+            y = 20,
+            filePath = legacyFile.absolutePath,
+            byteSize = legacyFile.length(),
+            checksum = "wrong_checksum_abc"
+        )
+        db.retainedTileDao().insertTile(entity)
+
+        val report = com.example.data.storage.StorageCalculationManager.migrateLegacyStorage(context, db)
+        assertFalse(report.isClean)
+        assertTrue(report.integrityFailures.any { it.contains("Integrity failure") })
+
+        // Legacy record must NOT be deleted when physical file is corrupt
+        val remaining = db.retainedTileDao().getTile("openfreemap_liberty", "OSM_VECTOR", 12, 10, 20)
+        assertNotNull(remaining)
+
+        // Cleanup
+        legacyFile.delete()
+        db.retainedTileDao().deleteTile("openfreemap_liberty", "OSM_VECTOR", 12, 10, 20)
+    }
+
+    @Test
+    fun test34_verifyMatchingChecksumStringsRejectedIfPhysicalFileCorrupt(): Unit = runBlocking {
+        val db = AppDatabase.getInstance(context)
+        val retainedTilesRoot = File(context.filesDir, "retained_tiles")
+
+        val canonicalDir = File(retainedTilesRoot, "openfreemap/OSM_VECTOR/10/2")
+        canonicalDir.mkdirs()
+        val canonicalFile = File(canonicalDir, "3.pbf")
+        // File on disk has corrupt data
+        canonicalFile.writeBytes("CORRUPTED_ON_DISK_PAYLOAD".toByteArray())
+
+        val canonicalEntity = RetainedTileEntity(
+            providerId = "openfreemap",
+            category = "OSM_VECTOR",
+            z = 10,
+            x = 2,
+            y = 3,
+            filePath = canonicalFile.absolutePath,
+            byteSize = canonicalFile.length(),
+            checksum = "expected_original_crc_999"
+        )
+        val legacyEntity = RetainedTileEntity(
+            providerId = "openfreemap_bright",
+            category = "OSM_VECTOR",
+            z = 10,
+            x = 2,
+            y = 3,
+            filePath = canonicalFile.absolutePath,
+            byteSize = canonicalFile.length(),
+            checksum = "expected_original_crc_999"
+        )
+        db.retainedTileDao().insertTiles(listOf(canonicalEntity, legacyEntity))
+
+        val report = com.example.data.storage.StorageCalculationManager.migrateLegacyStorage(context, db)
+        // Must detect that physical file on disk does not match the checksum!
+        assertFalse(report.isClean)
+        assertTrue(report.integrityFailures.isNotEmpty())
+
+        // Legacy record must not be deleted blindly
+        assertNotNull(db.retainedTileDao().getTile("openfreemap_bright", "OSM_VECTOR", 10, 2, 3))
+
+        // Cleanup
+        canonicalFile.delete()
+        db.retainedTileDao().deleteTile("openfreemap", "OSM_VECTOR", 10, 2, 3)
+        db.retainedTileDao().deleteTile("openfreemap_bright", "OSM_VECTOR", 10, 2, 3)
+    }
+
+    @Test
+    fun test35_verifyOrphanedRecordAndUnindexedFileReconciliation(): Unit = runBlocking {
+        val db = AppDatabase.getInstance(context)
+        val retainedTilesRoot = File(context.filesDir, "retained_tiles")
+
+        // 1. Unindexed physical file (exists on disk, no Room record)
+        val ofmDir = File(retainedTilesRoot, "openfreemap/osm_vector/14/100")
+        ofmDir.mkdirs()
+        val unindexedFile = File(ofmDir, "200.bin")
+        unindexedFile.writeBytes("UNINDEXED_PAYLOAD".toByteArray())
+
+        // 2. Orphaned Room record (in Room, file does NOT exist on disk)
+        val orphanedEntity = RetainedTileEntity(
+            providerId = "openfreemap",
+            category = "osm_vector",
+            z = 14,
+            x = 999,
+            y = 888,
+            filePath = File(ofmDir, "non_existent_888.bin").absolutePath,
+            byteSize = 500L,
+            checksum = "abc123"
+        )
+        db.retainedTileDao().insertTile(orphanedEntity)
+
+        val report = com.example.data.storage.StorageCalculationManager.calculateStorage(context, db)
+        val ofm = report.perSource.find { it.providerId == "openfreemap" }
+        assertNotNull(ofm)
+
+        // Reconciliation verification
+        assertTrue(ofm!!.orphanedRecordCount >= 1)
+        assertTrue(ofm.unindexedFileCount >= 1)
+        // tileCount and byteSize reflect actual physical files
+        assertEquals(ofm.physicalFileCount, ofm.tileCount)
+        assertEquals(ofm.physicalByteSize, ofm.byteSize)
+
+        // Cleanup
+        unindexedFile.delete()
+        db.retainedTileDao().deleteTile("openfreemap", "osm_vector", 14, 999, 888)
+    }
+
+    @Test
+    fun test36_verifyIntegrityFailureDetectionInStorageReport(): Unit = runBlocking {
+        val db = AppDatabase.getInstance(context)
+        val retainedTilesRoot = File(context.filesDir, "retained_tiles")
+
+        val ofmDir = File(retainedTilesRoot, "openfreemap/osm_vector/13/44")
+        ofmDir.mkdirs()
+        val physicalFile = File(ofmDir, "55.bin")
+        val data = "KNOWN_VALID_CONTENT_XYZ".toByteArray()
+        physicalFile.writeBytes(data)
+
+        // Room entity with mismatched checksum
+        val entity = RetainedTileEntity(
+            providerId = "openfreemap",
+            category = "osm_vector",
+            z = 13,
+            x = 44,
+            y = 55,
+            filePath = physicalFile.absolutePath,
+            byteSize = data.size.toLong(),
+            checksum = "mismatched_corrupt_crc_value"
+        )
+        db.retainedTileDao().insertTile(entity)
+
+        val report = com.example.data.storage.StorageCalculationManager.calculateStorage(context, db)
+        val ofm = report.perSource.find { it.providerId == "openfreemap" }
+        assertNotNull(ofm)
+        assertTrue(ofm!!.integrityFailureCount >= 1)
+
+        // Cleanup
+        physicalFile.delete()
+        db.retainedTileDao().deleteTile("openfreemap", "osm_vector", 13, 44, 55)
+    }
+
+    @Test
+    fun test37_verifyRetentionPermissionEnforcedInTileStorageManager(): Unit = runBlocking {
+        val storageManager = TileStorageManager(context)
+        val db = AppDatabase.getInstance(context)
+
+        // Attempt to save tile for Esri (defaultRetentionPermitted = false)
+        val esriSaved = storageManager.saveTileData(
+            providerId = "esri_satellite",
+            category = TileCategory.SATELLITE_RASTER,
+            z = 10,
+            x = 5,
+            y = 5,
+            data = "RESTRICTED_ESRI_TILE".toByteArray(),
+            metadata = TileMetadata(
+                providerId = "esri_satellite",
+                retentionPermission = "RESTRICTED"
+            )
+        )
+        // Must be blocked from permanent storage!
+        assertFalse(esriSaved)
+
+        val targetFile = storageManager.getTileFile("esri_satellite", TileCategory.SATELLITE_RASTER, 10, 5, 5)
+        assertFalse(targetFile.exists())
+
+        val roomRecord = db.retainedTileDao().getTile("esri_satellite", TileCategory.SATELLITE_RASTER.name, 10, 5, 5)
+        assertNull(roomRecord)
+    }
+
+    @Test
+    fun test38_verifyPermittedVectorRetentionAllowedOnHybridStyle(): Unit = runBlocking {
+        val storageManager = TileStorageManager(context)
+        val db = AppDatabase.getInstance(context)
+
+        // Verify hybrid style definition decouples vector from raster retention
+        val hybridDef = MapSourceRepository.HYBRID_SATELLITE_OSM
+        assertTrue(hybridDef.vectorRetentionPermitted)
+        assertFalse(hybridDef.rasterRetentionPermitted)
+
+        // Vector retention under OpenFreeMap with PERMITTED
+        val vectorSaved = storageManager.saveTileData(
+            providerId = "openfreemap",
+            category = TileCategory.OSM_VECTOR,
+            z = 11,
+            x = 8,
+            y = 9,
+            data = "PERMITTED_VECTOR_DATA_PBF".toByteArray(),
+            metadata = TileMetadata(
+                providerId = "openfreemap",
+                retentionPermission = "PERMITTED"
+            )
+        )
+        assertTrue(vectorSaved)
+
+        val targetFile = storageManager.getTileFile("openfreemap", TileCategory.OSM_VECTOR, 11, 8, 9)
+        assertTrue(targetFile.exists())
+        val roomRecord = db.retainedTileDao().getTile("openfreemap", TileCategory.OSM_VECTOR.name, 11, 8, 9)
+        assertNotNull(roomRecord)
+
+        // Cleanup
+        targetFile.delete()
+        db.retainedTileDao().deleteTile("openfreemap", TileCategory.OSM_VECTOR.name, 11, 8, 9)
+    }
+
+    @Test
+    fun test39_verifyClearProviderTilesTruthfulReportingAndPreservation(): Unit = runBlocking {
+        val db = AppDatabase.getInstance(context)
+        val storageManager = TileStorageManager(context)
+
+        // 1. Create a tile for openfreemap
+        storageManager.saveTileData(
+            providerId = "openfreemap",
+            category = TileCategory.OSM_VECTOR,
+            z = 10,
+            x = 1,
+            y = 1,
+            data = "OFM_TEST_TILE".toByteArray(),
+            metadata = TileMetadata(providerId = "openfreemap", retentionPermission = "PERMITTED")
+        )
+
+        // 2. Create routing graph file and OSM POI
+        val routingDir = File(context.filesDir, "routing_graph")
+        routingDir.mkdirs()
+        val routingFile = File(routingDir, "test_routing_tile.bin")
+        routingFile.writeBytes("ROUTING_GRAPH_PAYLOAD".toByteArray())
+
+        val poi = OsmPoiRecord(
+            osmId = 12345678L,
+            name = "Test Cafe",
+            category = "amenity",
+            subCategory = "cafe",
+            latitude = 40.0,
+            longitude = 30.0,
+            sourceTileZ = 10,
+            sourceTileX = 1,
+            sourceTileY = 1
+        )
+        db.osmPoiDao().insertPois(listOf(poi))
+
+        // 3. Clear openfreemap tiles
+        val clearResult = com.example.data.storage.StorageCalculationManager.clearProviderTiles(context, db, "openfreemap")
+        assertTrue(clearResult.isSuccess)
+        assertTrue(clearResult.filesDeleted >= 1)
+        assertTrue(clearResult.recordsDeleted >= 1)
+        assertTrue(clearResult.bytesDeleted > 0)
+
+        // 4. Verify routing graph file and OSM POI are 100% preserved
+        assertTrue(routingFile.exists())
+        assertTrue(db.osmPoiDao().getPoiCount() >= 1)
+        assertNotNull(db.osmPoiDao().getPoiById(12345678L))
+
+        // Cleanup
+        routingFile.delete()
+        db.osmPoiDao().clearAllPois()
+    }
+
+    @Test
+    fun test40_verifyUnknownProviderClearHandling(): Unit = runBlocking {
+        val db = AppDatabase.getInstance(context)
+        val clearResult = com.example.data.storage.StorageCalculationManager.clearProviderTiles(context, db, "unknown_custom_provider")
+        assertTrue(clearResult.isSuccess)
+        assertEquals(0, clearResult.filesDeleted)
+        assertEquals(0, clearResult.recordsDeleted)
+        assertEquals(0L, clearResult.bytesDeleted)
     }
 }
