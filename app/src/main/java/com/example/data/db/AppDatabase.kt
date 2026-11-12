@@ -91,16 +91,72 @@ data class OsmPoiRecord(
     val fetchTimestamp: Long = System.currentTimeMillis()
 )
 
+data class CategoryCountTuple(
+    val category: String,
+    val count: Int
+)
+
 @Dao
 interface OsmPoiDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertPois(pois: List<OsmPoiRecord>)
 
-    @Query("SELECT * FROM osm_pois WHERE name LIKE '%' || :query || '%' OR category LIKE '%' || :query || '%' ORDER BY name ASC LIMIT :limit")
-    suspend fun searchPois(query: String, limit: Int = 20): List<OsmPoiRecord>
+    @Query("""
+        SELECT * FROM osm_pois
+        WHERE name LIKE '%' || :escapedQuery || '%' ESCAPE '\'
+           OR category LIKE '%' || :escapedQuery || '%' ESCAPE '\'
+           OR COALESCE(subCategory, '') LIKE '%' || :escapedQuery || '%' ESCAPE '\'
+        ORDER BY
+            CASE
+                WHEN LOWER(name) = LOWER(:rawQuery) THEN 0
+                WHEN LOWER(name) LIKE LOWER(:escapedQuery) || '%' ESCAPE '\' THEN 1
+                ELSE 2
+            END,
+            name ASC
+        LIMIT :limit
+    """)
+    suspend fun searchPois(escapedQuery: String, rawQuery: String = escapedQuery, limit: Int = 20): List<OsmPoiRecord>
 
-    @Query("SELECT * FROM osm_pois WHERE (name LIKE '%' || :query || '%' OR category LIKE '%' || :query || '%') AND category = :category ORDER BY name ASC LIMIT :limit")
-    suspend fun searchPoisByCategory(query: String, category: String, limit: Int = 20): List<OsmPoiRecord>
+    @Query("""
+        SELECT * FROM osm_pois
+        WHERE (LOWER(category) = LOWER(:category) OR LOWER(COALESCE(subCategory, '')) = LOWER(:category))
+          AND (name LIKE '%' || :escapedQuery || '%' ESCAPE '\'
+               OR category LIKE '%' || :escapedQuery || '%' ESCAPE '\'
+               OR COALESCE(subCategory, '') LIKE '%' || :escapedQuery || '%' ESCAPE '\')
+        ORDER BY
+            CASE
+                WHEN LOWER(name) = LOWER(:rawQuery) THEN 0
+                WHEN LOWER(name) LIKE LOWER(:escapedQuery) || '%' ESCAPE '\' THEN 1
+                ELSE 2
+            END,
+            name ASC
+        LIMIT :limit
+    """)
+    suspend fun searchPoisByCategory(
+        escapedQuery: String,
+        category: String,
+        rawQuery: String = escapedQuery,
+        limit: Int = 20
+    ): List<OsmPoiRecord>
+
+    @Query("""
+        SELECT * FROM osm_pois
+        WHERE LOWER(category) = LOWER(:category)
+           OR LOWER(COALESCE(subCategory, '')) = LOWER(:category)
+        ORDER BY name ASC
+        LIMIT :limit
+    """)
+    suspend fun getPoisByCategoryOnly(category: String, limit: Int = 20): List<OsmPoiRecord>
+
+    @Query("""
+        SELECT LOWER(category) AS category, COUNT(*) AS count
+        FROM osm_pois
+        WHERE TRIM(category) != ''
+        GROUP BY LOWER(category)
+        ORDER BY count DESC, category ASC
+        LIMIT :limit
+    """)
+    suspend fun getCategoryCounts(limit: Int = 25): List<CategoryCountTuple>
 
     @Query("SELECT COUNT(*) FROM osm_pois")
     suspend fun getPoiCount(): Int

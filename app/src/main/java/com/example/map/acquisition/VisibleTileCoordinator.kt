@@ -128,7 +128,8 @@ class VisibleTileCoordinator(
             map.cameraPosition.zoom
         }
 
-        val integerZoom = floor(zoom).toInt().coerceIn(0, 18)
+        // OpenFreeMap / OpenMapTiles vector tiles top out at zoom 14; zooming past 14 still uses z=14 vector tiles
+        val integerZoom = floor(zoom).toInt().coerceIn(0, 14)
         val visibleTiles = calculateVisibleTiles(visibleRegion, integerZoom)
 
         if (visibleTiles.isEmpty()) return

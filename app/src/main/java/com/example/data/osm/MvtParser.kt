@@ -138,8 +138,15 @@ object MvtParser {
 
             when (layerName) {
                 "poi" -> {
-                    val name = tagsMap["name"] ?: tagsMap["name_en"] ?: tagsMap["class"] ?: "POI"
-                    val category = tagsMap["class"] ?: tagsMap["subclass"] ?: "general"
+                    val name = tagsMap["name"]?.takeIf { it.isNotBlank() }
+                        ?: tagsMap["name_en"]?.takeIf { it.isNotBlank() }
+                        ?: tagsMap["name:latin"]?.takeIf { it.isNotBlank() }
+                        ?: tagsMap["class"]?.takeIf { it.isNotBlank() }
+                        ?: tagsMap["subclass"]?.takeIf { it.isNotBlank() }
+                        ?: "POI"
+                    val category = tagsMap["class"]?.takeIf { it.isNotBlank() }
+                        ?: tagsMap["subclass"]?.takeIf { it.isNotBlank() }
+                        ?: "general"
                     val (lat, lng) = decodeFirstPoint(rf.geometry, extent, tileCoord)
                     pois.add(
                         OsmPoiRecord(
@@ -309,6 +316,8 @@ object MvtParser {
                 cursorX += dx
                 cursorY += dy
                 return tilePointToLatLng(cursorX, cursorY, extent, tile)
+            } else if (cmd == 1 || cmd == 2) {
+                idx += count * 2
             }
         }
         // Fallback to tile center

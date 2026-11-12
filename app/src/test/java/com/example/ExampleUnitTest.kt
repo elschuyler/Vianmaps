@@ -1165,4 +1165,220 @@ class ExampleUnitTest {
         assertEquals(0, clearResult.recordsDeleted)
         assertEquals(0L, clearResult.bytesDeleted)
     }
+
+    @Test
+    fun test41_verifyOfflinePoiSearchExactPartialCaseAndUnicode(): Unit = runBlocking {
+        val db = AppDatabase.getInstance(context)
+        db.osmPoiDao().clearAllPois()
+        val repo = OsmOfflineDataRepository(context)
+
+        val pois = listOf(
+            OsmPoiRecord(101L, "Blue Bottle Coffee", "amenity", "cafe", 37.775, -122.419, 14, 2621, 6332),
+            OsmPoiRecord(102L, "Coffee", "amenity", "cafe", 37.776, -122.418, 14, 2621, 6332),
+            OsmPoiRecord(103L, "Turkish Tea House", "amenity", "cafe", 39.933, 32.859, 14, 9687, 6199),
+            OsmPoiRecord(104L, "Kızılay Square", "place", "square", 39.9208, 32.8541, 14, 9687, 6199),
+            OsmPoiRecord(105L, "Ankara Castle", "historic", "castle", 39.9412, 32.8644, 14, 9687, 6199)
+        )
+        db.osmPoiDao().insertPois(pois)
+
+        // Exact match prioritized ahead of partial match
+        val exactFirst = repo.searchPois(query = "coffee", category = null, limit = 30)
+        assertEquals(2, exactFirst.size)
+        assertEquals("Coffee", exactFirst[0].name)
+        assertEquals("Blue Bottle Coffee", exactFirst[1].name)
+
+        // Uppercase ASCII case-insensitive query
+        val upperResults = repo.searchPois(query = "COFFEE", category = null, limit = 30)
+        assertEquals(2, upperResults.size)
+
+        // Partial match
+        val partial = repo.searchPois(query = "tea", category = null, limit = 30)
+        assertEquals(1, partial.size)
+        assertEquals(103L, partial[0].osmId)
+
+        // Non-ASCII / Unicode case-insensitive matching
+        val unicodeLower = repo.searchPois(query = "kızılay", category = null, limit = 30)
+        assertEquals(1, unicodeLower.size)
+        assertEquals("Kızılay Square", unicodeLower[0].name)
+
+        db.osmPoiDao().clearAllPois()
+    }
+
+    @Test
+    fun test42_verifyPoiCategoryFilteringSubCategoryAndCategoryCounts(): Unit = runBlocking {
+        val db = AppDatabase.getInstance(context)
+        db.osmPoiDao().clearAllPois()
+        val repo = OsmOfflineDataRepository(context)
+
+        val pois = listOf(
+            OsmPoiRecord(201L, "Cafe Central", "amenity", "cafe", 39.91, 32.85, 14, 9687, 6199),
+            OsmPoiRecord(202L, "Central Park", "leisure", "park", 39.92, 32.86, 14, 9687, 6199),
+            OsmPoiRecord(203L, "Boulangerie Midi", "shop", "bakery", 39.93, 32.87, 14, 9687, 6199),
+            OsmPoiRecord(204L, "Corner Espresso", "amenity", "cafe", 39.94, 32.88, 14, 9687, 6199)
+        )
+        db.osmPoiDao().insertPois(pois)
+
+        // Category-only browsing when query is blank
+        val amenityOnly = repo.searchPois(query = "", category = "AMENITY", limit = 30)
+        assertEquals(2, amenityOnly.size)
+        assertTrue(amenityOnly.all { it.category == "amenity" })
+
+        // Combined query + category disambiguates "Central"
+        val centralLeisure = repo.searchPois(query = "central", category = "leisure", limit = 30)
+        assertEquals(1, centralLeisure.size)
+        assertEquals("Central Park", centralLeisure[0].name)
+
+        // Matches subCategory too
+        val bakeryBySubCat = repo.searchPois(query = "bakery", category = null, limit = 30)
+        assertEquals(1, bakeryBySubCat.size)
+        assertEquals("Boulangerie Midi", bakeryBySubCat[0].name)
+
+        // Aggregated category counts
+        val counts = repo.getCategoryCounts(limit = 25)
+        assertEquals(3, counts.size)
+        assertEquals("amenity", counts[0].category)
+        assertEquals(2, counts[0].count)
+
+        db.osmPoiDao().clearAllPois()
+    }
+
+    @Test
+    fun test43_verifyBlankWhitespaceEmptyDbLimitAndWildcardEscaping(): Unit = runBlocking {
+        val db = AppDatabase.getInstance(context)
+        db.osmPoiDao().clearAllPois()
+        val repo = OsmOfflineDataRepository(context)
+
+        // Empty DB returns empty cleanly
+        assertTrue(repo.searchPois("park", null).isEmpty())
+        assertTrue(repo.searchPois("", "amenity").isEmpty())
+
+        val bulkPois = (1..45).map { idx ->
+            OsmPoiRecord(
+                osmId = 3000L + idx,
+                name = "City Park #$idx",
+                category = "leisure",
+                subCategory = "park",
+                latitude = 39.9 + (idx * 0.0001),
+                longitude = 32.8 + (idx * 0.0001),
+                sourceTileZ = 14,
+                sourceTileX = 9687,
+                sourceTileY = 6199
+            )
+        } + listOf(
+            OsmPoiRecord(3901L, "100% Fresh Market", "shop", "supermarket", 39.95, 32.89, 14, 9687, 6199),
+            OsmPoiRecord(3902L, "100 Regular Market", "shop", "supermarket", 39.96, 32.90, 14, 9687, 6199)
+        )
+        db.osmPoiDao().insertPois(bulkPois)
+
+        // Blank / whitespace-only queries without category return empty list
+        assertTrue(repo.searchPois("", null).isEmpty())
+        assertTrue(repo.searchPois("   \t\n ", null).isEmpty())
+
+        // Result limit cap enforced
+        val limited = repo.searchPois("City Park", null, limit = 30)
+        assertEquals(30, limited.size)
+
+        // SQL LIKE wildcards '%' safely escaped
+        val pctResults = repo.searchPois("100%", null, limit = 30)
+        assertEquals(1, pctResults.size)
+        assertEquals("100% Fresh Market", pctResults[0].name)
+
+        db.osmPoiDao().clearAllPois()
+    }
+
+    @Test
+    fun test44_verifyDuplicatePoiIngestionDoesNotDuplicateSearchResults(): Unit = runBlocking {
+        val db = AppDatabase.getInstance(context)
+        db.osmPoiDao().clearAllPois()
+        val repo = OsmOfflineDataRepository(context)
+
+        // Insert same osmId twice (overlapping adjacent tiles)
+        db.osmPoiDao().insertPois(
+            listOf(OsmPoiRecord(4001L, "Union Station", "railway", "station", 38.897, -77.006, 14, 4688, 6267))
+        )
+        db.osmPoiDao().insertPois(
+            listOf(OsmPoiRecord(4001L, "Union Station", "railway", "station", 38.897, -77.006, 14, 4689, 6267))
+        )
+
+        assertEquals(1, db.osmPoiDao().getPoiCount())
+        val results = repo.searchPois("Union Station", null, limit = 30)
+        assertEquals(1, results.size)
+
+        db.osmPoiDao().clearAllPois()
+    }
+
+    @Test
+    fun test45_verifyOfflinePoiSearchSelectionAndControllerHandoff(): Unit = runBlocking {
+        val db = AppDatabase.getInstance(context)
+        db.osmPoiDao().clearAllPois()
+
+        // Enforce strict offline mode (zero internet allowed)
+        AppNetworkPolicy.setInternetEnabled(false)
+        assertFalse(AppNetworkPolicy.isNetworkAllowed())
+
+        val targetPoi = OsmPoiRecord(
+            osmId = 5001L,
+            name = "Anıtkabir Memorial",
+            category = "historic",
+            subCategory = "monument",
+            latitude = 39.9250,
+            longitude = 32.8369,
+            sourceTileZ = 14,
+            sourceTileX = 9686,
+            sourceTileY = 6199
+        )
+        db.osmPoiDao().insertPois(listOf(targetPoi))
+
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        val viewModel = MapViewModel(app)
+        val controller = com.example.map.engine.MapEngineController(
+            context = context,
+            initialLat = 0.0,
+            initialLng = 0.0,
+            initialZoom = 2.0,
+            initialBearing = 0.0,
+            onCameraMoved = { _, _, _, _ -> }
+        )
+
+        viewModel.openPoiSearch()
+        assertEquals(ActiveModal.PoiSearch, viewModel.uiState.value.activeModal)
+
+        // Trigger immediate search (debounceMs = 0L)
+        viewModel.updatePoiSearchQuery("anıtkabir", debounceMs = 0L)
+
+        // Pump Robolectric main looper while IO dispatcher finishes Room query
+        val deadlineMs = System.currentTimeMillis() + 3000L
+        while (!viewModel.uiState.value.poiSearchState.hasSearched && System.currentTimeMillis() < deadlineMs) {
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            kotlinx.coroutines.delay(15L)
+        }
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+
+        val searchState = viewModel.uiState.value.poiSearchState
+        assertTrue(searchState.hasSearched)
+        assertEquals(1, searchState.results.size)
+        assertEquals(5001L, searchState.results[0].osmId)
+
+        // Select result and verify camera coordinate handoff + highlight + search cleanup
+        viewModel.selectSearchResult(searchState.results[0], controller)
+        assertNull(viewModel.uiState.value.activeModal)
+        assertEquals(5001L, viewModel.uiState.value.highlightedPoi?.osmId)
+        assertTrue(viewModel.uiState.value.isPoiHighlightVisible)
+        assertTrue(viewModel.uiState.value.poiSearchState.results.isEmpty())
+
+        assertEquals(5001L, controller.currentHighlightedPoi?.osmId)
+        assertEquals(Pair(39.9250, 32.8369), controller.lastCameraFocusTarget)
+
+        // Toggle highlight visibility & clear highlight
+        viewModel.togglePoiHighlightVisibility(controller)
+        assertFalse(viewModel.uiState.value.isPoiHighlightVisible)
+        assertFalse(controller.isHighlightVisible)
+
+        viewModel.clearHighlightedPoi(controller)
+        assertNull(viewModel.uiState.value.highlightedPoi)
+        assertNull(controller.currentHighlightedPoi)
+
+        db.osmPoiDao().clearAllPois()
+        AppNetworkPolicy.setInternetEnabled(true)
+    }
 }

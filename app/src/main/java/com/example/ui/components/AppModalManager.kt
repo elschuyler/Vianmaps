@@ -81,6 +81,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Layers
 import com.example.map.composition.MapComposition
 import androidx.compose.material.icons.filled.Terminal
+import com.example.data.db.OsmPoiRecord
 import com.example.ui.screens.MapUiState
 
 @Composable
@@ -107,7 +108,15 @@ fun AppModalManager(
     onOpenBackupRestore: () -> Unit,
     onOpenTool: (name: String, desc: String) -> Unit,
     onOpenMemoryPalace: () -> Unit,
-    onOpenLogKeeper: () -> Unit
+    onOpenLogKeeper: () -> Unit,
+    onOpenPoiSearch: () -> Unit,
+    onOpenPoiHighlight: () -> Unit,
+    onPoiQueryChange: (String) -> Unit,
+    onPoiCategorySelect: (String?) -> Unit,
+    onSelectPoiResult: (OsmPoiRecord) -> Unit,
+    onTogglePoiHighlightVisibility: () -> Unit,
+    onRecenterPoiHighlight: () -> Unit,
+    onClearPoiHighlight: () -> Unit
 ) {
     if (settingsPopupOpen) {
         FloatingPopupDialog(onDismiss = onDismissSettingsPopup) {
@@ -193,10 +202,37 @@ fun AppModalManager(
         is ActiveModal.ToolsPopup -> {
             FloatingPopupDialog(onDismiss = onDismissModal) {
                 ToolsPopupContent(
+                    onOpenSearch = onOpenPoiSearch,
+                    onOpenHighlight = onOpenPoiHighlight,
                     onSelectTool = { name, desc ->
                         onDismissModal()
                         onOpenTool(name, desc)
                     },
+                    onClose = onDismissModal
+                )
+            }
+        }
+        is ActiveModal.PoiSearch -> {
+            FullScreenModal(title = "Offline POI Search", onClose = onDismissModal) {
+                PoiSearchContent(
+                    searchState = uiState.poiSearchState,
+                    isDeviceOnline = isDeviceOnline,
+                    isInternetEnabled = uiState.isInternetEnabled,
+                    onQueryChange = onPoiQueryChange,
+                    onSelectCategory = onPoiCategorySelect,
+                    onSelectPoi = onSelectPoiResult
+                )
+            }
+        }
+        is ActiveModal.PoiHighlight -> {
+            FloatingPopupDialog(onDismiss = onDismissModal) {
+                PoiHighlightPopupContent(
+                    highlightedPoi = uiState.highlightedPoi,
+                    isHighlightVisible = uiState.isPoiHighlightVisible,
+                    onToggleVisibility = onTogglePoiHighlightVisibility,
+                    onRecenter = onRecenterPoiHighlight,
+                    onClearHighlight = onClearPoiHighlight,
+                    onOpenSearch = onOpenPoiSearch,
                     onClose = onDismissModal
                 )
             }
@@ -663,12 +699,14 @@ private fun PlaceItemRow(
 
 @Composable
 fun ToolsPopupContent(
+    onOpenSearch: () -> Unit,
+    onOpenHighlight: () -> Unit,
     onSelectTool: (name: String, desc: String) -> Unit,
     onClose: () -> Unit
 ) {
     val tools = listOf(
-        Pair("Search", "Search locations, coordinates, and placemarks"),
-        Pair("Highlight", "Area and polygon boundary selection"),
+        Pair("Search", "Search locally acquired OSM places & categories"),
+        Pair("Highlight", "Inspect & highlight selected local POI on map"),
         Pair("Measure", "Distance and terrain elevation calculation"),
         Pair("Navigate", "Compass bearings and azimuth waypoints"),
         Pair("Weather", "Atmospheric pressure and radar preview"),
@@ -699,7 +737,13 @@ fun ToolsPopupContent(
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(8.dp))
                         .background(SurfaceOffWhite)
-                        .clickable { onSelectTool(name, desc) }
+                        .clickable {
+                            when (name) {
+                                "Search" -> onOpenSearch()
+                                "Highlight" -> onOpenHighlight()
+                                else -> onSelectTool(name, desc)
+                            }
+                        }
                         .padding(horizontal = 8.dp, vertical = 2.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -1212,10 +1256,8 @@ fun ToolPlaceholderContent(name: String, description: String, onClose: () -> Uni
         Spacer(modifier = Modifier.height(10.dp))
 
         val detailedNote = when (name.lowercase()) {
-            "search" -> "Offline search will query cached OpenStreetMap POIs, addresses, and custom Placemarks directly from the local Room database."
             "navigate" -> "Navigation displays sensor compass azimuth and bearing waypoints. Turn-by-turn routing calculation requires a routing engine graph."
             "measure" -> "Calculates geodesic distances and polygon surface areas using WGS84 ellipsoidal geometry."
-            "highlight" -> "Allows defining polygonal bounding areas and geographic zones on top of active vector tiles."
             "weather" -> "Atmospheric pressure and local barometric sensor readings will display alongside weather tile layers."
             "field tools" -> "Grid offsets, MGRS/UTM coordinate conversions, and compass resection markers for field work."
             else -> "Feature scheduled for upcoming release phase. Clean architecture boundaries and repository bindings are in place."

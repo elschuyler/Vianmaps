@@ -46,6 +46,7 @@ import com.example.map.engine.MapEngineController
 import com.example.ui.components.AppModalManager
 import com.example.ui.components.BottomNavigationBar
 import com.example.ui.components.RightSideMapControls
+import com.example.ui.components.SelectedPoiHighlightBanner
 import com.example.ui.components.TopCoordinateInfoPanel
 import kotlinx.coroutines.launch
 import org.maplibre.android.MapLibre
@@ -113,6 +114,11 @@ fun MainMapScreen(
                 viewModel.onMapStatusChanged(status, desc, err)
             }
         }
+    }
+
+    // Keep MapEngineController highlight state in sync with ViewModel across recompositions/rotation
+    LaunchedEffect(uiState.highlightedPoi?.osmId, uiState.isPoiHighlightVisible) {
+        controller.syncHighlightedPoiState(uiState.highlightedPoi, uiState.isPoiHighlightVisible)
     }
 
     Scaffold(
@@ -272,6 +278,10 @@ fun MainMapScreen(
                         source = "MainMapScreen",
                         description = "Map-ready callback received (MapView#$mvId)",
                         stage = "MAP_READY"
+                    )
+                    controller.syncHighlightedPoiState(
+                        poi = viewModel.uiState.value.highlightedPoi,
+                        visible = viewModel.uiState.value.isPoiHighlightVisible
                     )
                     controller.attachMap(
                         map = maplibreMap,
@@ -525,6 +535,22 @@ fun MainMapScreen(
                     .padding(start = 8.dp, bottom = 8.dp)
             )
 
+            // Selected POI floating highlight banner above bottom bar when no modal is open
+            val highlightedPoi = uiState.highlightedPoi
+            if (highlightedPoi != null && uiState.activeModal == null && !uiState.settingsPopupOpen) {
+                SelectedPoiHighlightBanner(
+                    poi = highlightedPoi,
+                    isHighlightVisible = uiState.isPoiHighlightVisible,
+                    onRecenter = { viewModel.recenterOnHighlightedPoi(controller) },
+                    onToggleVisibility = { viewModel.togglePoiHighlightVisibility(controller) },
+                    onDismiss = { viewModel.clearHighlightedPoi(controller) },
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .navigationBarsPadding()
+                        .padding(start = 8.dp, end = 64.dp, bottom = 60.dp)
+                )
+            }
+
             // Floating Popups & Modals (All unified in crisp White & Sky Blue)
             AppModalManager(
                 activeModal = uiState.activeModal,
@@ -571,6 +597,30 @@ fun MainMapScreen(
                 },
                 onOpenLogKeeper = {
                     viewModel.openModal(ActiveModal.LogKeeper)
+                },
+                onOpenPoiSearch = {
+                    viewModel.openPoiSearch()
+                },
+                onOpenPoiHighlight = {
+                    viewModel.openPoiHighlight()
+                },
+                onPoiQueryChange = { query ->
+                    viewModel.updatePoiSearchQuery(query)
+                },
+                onPoiCategorySelect = { category ->
+                    viewModel.selectPoiSearchCategory(category)
+                },
+                onSelectPoiResult = { poi ->
+                    viewModel.selectSearchResult(poi, controller)
+                },
+                onTogglePoiHighlightVisibility = {
+                    viewModel.togglePoiHighlightVisibility(controller)
+                },
+                onRecenterPoiHighlight = {
+                    viewModel.recenterOnHighlightedPoi(controller)
+                },
+                onClearPoiHighlight = {
+                    viewModel.clearHighlightedPoi(controller)
                 }
             )
         }

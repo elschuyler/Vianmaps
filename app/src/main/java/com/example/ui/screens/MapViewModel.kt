@@ -21,10 +21,31 @@ import com.example.map.engine.MapEngineController
 import com.example.map.engine.MapEngineStatus
 
 import com.example.data.db.AppDatabase
+import com.example.data.db.OsmPoiRecord
+import com.example.data.osm.OsmOfflineDataRepository
 import com.example.data.storage.OverallStorageReport
 import com.example.data.storage.StorageCalculationManager
 import com.example.map.composition.MapComposition
 import com.example.map.composition.MapCompositionDefaults
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+
+data class PoiCategoryOption(
+    val category: String,
+    val count: Int
+)
+
+data class PoiSearchUiState(
+    val query: String = "",
+    val selectedCategory: String? = null,
+    val results: List<OsmPoiRecord> = emptyList(),
+    val availableCategories: List<PoiCategoryOption> = emptyList(),
+    val totalLocalPoiCount: Int = 0,
+    val isSearching: Boolean = false,
+    val hasSearched: Boolean = false,
+    val errorMessage: String? = null
+)
 
 data class MapUiState(
     val camera: MapCameraState = MapCameraState(),
@@ -42,7 +63,10 @@ data class MapUiState(
     val mapLoadingStage: String = "INITIALIZING",
     val lastMapError: String? = null,
     val activeModal: ActiveModal? = null,
-    val settingsPopupOpen: Boolean = false
+    val settingsPopupOpen: Boolean = false,
+    val highlightedPoi: OsmPoiRecord? = null,
+    val isPoiHighlightVisible: Boolean = true,
+    val poiSearchState: PoiSearchUiState = PoiSearchUiState()
 )
 
 sealed interface ActiveModal {
@@ -54,13 +78,18 @@ sealed interface ActiveModal {
     data object PlacesPopup : ActiveModal
     data object MemoryPalaceWorkspace : ActiveModal
     data object ToolsPopup : ActiveModal
+    data object PoiSearch : ActiveModal
+    data object PoiHighlight : ActiveModal
     data class PlaceholderTool(val name: String, val description: String) : ActiveModal
 }
 
 class MapViewModel(application: Application) : AndroidViewModel(application) {
 
     private val preferencesRepository = AppPreferencesRepository(application)
+    private val osmRepository = OsmOfflineDataRepository(application)
     val networkMonitor = NetworkDiagnosticsMonitor(application)
+
+    private var searchJob: Job? = null
 
     private val _uiState = MutableStateFlow(MapUiState())
     val uiState: StateFlow<MapUiState> = _uiState.asStateFlow()
@@ -400,12 +429,197 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun openPoiSearch() {
+        _uiState.value = _uiState.value.copy(
+            activeModal = ActiveModal.PoiSearch,
+            settingsPopupOpen = false,
+            poiSearchState = _uiState.value.poiSearchState.copy(errorMessage = null)
+        )
+        refreshLocalPoiCatalogStats()
+    }
+
+    fun openPoiHighlight() {
+        _uiState.value = _uiState.value.copy(
+            activeModal = ActiveModal.PoiHighlight,
+            settingsPopupOpen = false
+        )
+    }
+
+    fun refreshLocalPoiCatalogStats() {
+        viewModelScope.launch {
+            try {
+                val totalCount = osmRepository.getPoiCount()
+                val categoryCounts = osmRepository.getCategoryCounts(limit = 25)
+                    .map { PoiCategoryOption(category = it.category, count = it.count) }
+                _uiState.value = _uiState.value.copy(
+                    poiSearchState = _uiState.value.poiSearchState.copy(
+                        totalLocalPoiCount = totalCount,
+                        availableCategories = categoryCounts
+                    )
+                )
+            } catch (e: Throwable) {
+                DiagnosticRepository.log(
+                    severity = LogSeverity.WARNING,
+                    source = "MapViewModel",
+                    description = "Failed reading local POI catalog summary: ${e.message}"
+                )
+            }
+        }
+    }
+
+    fun updatePoiSearchQuery(query: String, debounceMs: Long = 200L) {
+        val currentSearch = _uiState.value.poiSearchState
+        _uiState.value = _uiState.value.copy(
+            poiSearchState = currentSearch.copy(query = query)
+        )
+        executePoiSearch(
+            query = query,
+            category = currentSearch.selectedCategory,
+            debounceMs = debounceMs
+        )
+    }
+
+    fun selectPoiSearchCategory(category: String?) {
+        val currentSearch = _uiState.value.poiSearchState
+        val normalized = category?.trim()?.takeIf { it.isNotEmpty() }
+        val nextCategory = if (currentSearch.selectedCategory.equals(normalized, ignoreCase = true)) {
+            null
+        } else {
+            normalized
+        }
+        _uiState.value = _uiState.value.copy(
+            poiSearchState = currentSearch.copy(selectedCategory = nextCategory)
+        )
+        executePoiSearch(
+            query = currentSearch.query,
+            category = nextCategory,
+            debounceMs = 0L
+        )
+    }
+
+    private fun executePoiSearch(query: String, category: String?, debounceMs: Long) {
+        searchJob?.cancel()
+        val trimmed = query.trim()
+        val cat = category?.trim()?.takeIf { it.isNotEmpty() }
+
+        if (trimmed.isEmpty() && cat == null) {
+            _uiState.value = _uiState.value.copy(
+                poiSearchState = _uiState.value.poiSearchState.copy(
+                    results = emptyList(),
+                    isSearching = false,
+                    hasSearched = false,
+                    errorMessage = null
+                )
+            )
+            return
+        }
+
+        _uiState.value = _uiState.value.copy(
+            poiSearchState = _uiState.value.poiSearchState.copy(
+                isSearching = true,
+                errorMessage = null
+            )
+        )
+
+        searchJob = viewModelScope.launch {
+            try {
+                if (debounceMs > 0L) {
+                    delay(debounceMs)
+                }
+                val matches = osmRepository.searchPois(query = trimmed, category = cat, limit = 30)
+                _uiState.value = _uiState.value.copy(
+                    poiSearchState = _uiState.value.poiSearchState.copy(
+                        results = matches,
+                        isSearching = false,
+                        hasSearched = true,
+                        errorMessage = null
+                    )
+                )
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (e: Throwable) {
+                DiagnosticRepository.log(
+                    severity = LogSeverity.WARNING,
+                    source = "PoiSearch",
+                    description = "Local Room POI search failed: ${e.message}"
+                )
+                _uiState.value = _uiState.value.copy(
+                    poiSearchState = _uiState.value.poiSearchState.copy(
+                        results = emptyList(),
+                        isSearching = false,
+                        hasSearched = true,
+                        errorMessage = "Unable to query local POI database: ${e.message ?: "Unknown error"}"
+                    )
+                )
+            }
+        }
+    }
+
+    fun selectSearchResult(poi: OsmPoiRecord, controller: MapEngineController? = null) {
+        searchJob?.cancel()
+        _uiState.value = _uiState.value.copy(
+            highlightedPoi = poi,
+            isPoiHighlightVisible = true,
+            activeModal = null,
+            settingsPopupOpen = false,
+            poiSearchState = _uiState.value.poiSearchState.copy(
+                query = "",
+                selectedCategory = null,
+                results = emptyList(),
+                isSearching = false,
+                hasSearched = false,
+                errorMessage = null
+            )
+        )
+        controller?.highlightPoi(poi, moveCamera = true)
+    }
+
+    fun togglePoiHighlightVisibility(controller: MapEngineController? = null) {
+        val nextVisible = !_uiState.value.isPoiHighlightVisible
+        _uiState.value = _uiState.value.copy(isPoiHighlightVisible = nextVisible)
+        controller?.setHighlightVisible(nextVisible)
+    }
+
+    fun recenterOnHighlightedPoi(controller: MapEngineController? = null) {
+        val poi = _uiState.value.highlightedPoi ?: return
+        _uiState.value = _uiState.value.copy(isPoiHighlightVisible = true)
+        controller?.highlightPoi(poi, moveCamera = true)
+    }
+
+    fun clearHighlightedPoi(controller: MapEngineController? = null) {
+        _uiState.value = _uiState.value.copy(
+            highlightedPoi = null,
+            isPoiHighlightVisible = true
+        )
+        controller?.clearPoiHighlight()
+    }
+
     fun openModal(modal: ActiveModal) {
+        if (_uiState.value.activeModal is ActiveModal.PoiSearch && modal !is ActiveModal.PoiSearch) {
+            releaseTemporarySearchResources()
+        }
         _uiState.value = _uiState.value.copy(activeModal = modal, settingsPopupOpen = false)
     }
 
     fun closeModal() {
+        if (_uiState.value.activeModal is ActiveModal.PoiSearch) {
+            releaseTemporarySearchResources()
+        }
         _uiState.value = _uiState.value.copy(activeModal = null, settingsPopupOpen = false)
+    }
+
+    private fun releaseTemporarySearchResources() {
+        searchJob?.cancel()
+        _uiState.value = _uiState.value.copy(
+            poiSearchState = _uiState.value.poiSearchState.copy(
+                query = "",
+                selectedCategory = null,
+                results = emptyList(),
+                isSearching = false,
+                hasSearched = false,
+                errorMessage = null
+            )
+        )
     }
 
     fun openSettingsPopup() {
@@ -418,6 +632,7 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         super.onCleared()
+        searchJob?.cancel()
         networkMonitor.unregister()
     }
 }

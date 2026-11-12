@@ -226,3 +226,33 @@ This file series is the project's permanent audit trail across sessions. Each fi
 * **Deviations from request**: None.
 * **Known issues / follow-up**: None. Ready for on-device manual QA.
 
+---
+
+### Entry 2026-11-12T22:59:00Z — Phase 4.0: Offline POI Search & Map Highlighting
+* **Summary**: Implement local-first offline POI search querying Room `osm_pois` acquired from viewed vector tiles, Compass/Tools Search & Highlight entries, live MapLibre target highlighting across style switches, and Selected POI banner.
+* **Exact files touched**:
+  - `app/src/main/java/com/example/data/db/AppDatabase.kt` (added `CategoryCountTuple`; updated `OsmPoiDao` with `ESCAPE '\'` LIKE queries across `name`/`category`/`subCategory`, exact/prefix relevance ranking, case-insensitive category filtering, `getPoisByCategoryOnly`, and `getCategoryCounts`; preserved DB version 1)
+  - `app/src/main/java/com/example/data/osm/OsmOfflineDataRepository.kt` (updated `searchPois` with blank-query guard, category-only mode, SQL wildcard escaping, result cap, and bounded Unicode fallback matching; added `getCategoryCounts` and `getSamplePois`)
+  - `app/src/main/java/com/example/data/osm/MvtParser.kt` (added `isNotBlank()` tag guards, `name:latin` fallback, and fixed `decodeFirstPoint` loop index stride for non-MoveTo commands)
+  - `app/src/main/java/com/example/map/acquisition/VisibleTileCoordinator.kt` (clamped acquisition zoom in `processVisibleCoverage` to `0..14` matching OpenFreeMap vector `maxzoom = 14`)
+  - `app/src/main/java/com/example/map/engine/MapEngineController.kt` (added `GeoJsonSource` + dual `CircleLayer` POI highlight rendering, camera focus, visibility toggle, clear, style/composition restore, and highlight layer guard in `applyCompositionOverlays`)
+  - `app/src/main/java/com/example/ui/screens/MapViewModel.kt` (added `PoiCategoryOption`, `PoiSearchUiState`, `highlightedPoi`, `isPoiHighlightVisible`, `ActiveModal.PoiSearch`, `ActiveModal.PoiHighlight`, debounced `Dispatchers.IO` search with job cancellation, selection/recenter/clear handlers, and resource release on close)
+  - `app/src/main/java/com/example/ui/components/PoiSearchModal.kt` (created Offline POI Search screen with local-only notice, search box, dynamic category chips, loading/empty/error/no-match states, and bounded results list)
+  - `app/src/main/java/com/example/ui/components/PoiHighlightOverlays.kt` (created `SelectedPoiHighlightBanner` map overlay card and `PoiHighlightPopupContent` for `Tools -> Highlight`)
+  - `app/src/main/java/com/example/ui/components/AppModalManager.kt` (wired `ActiveModal.PoiSearch`, `ActiveModal.PoiHighlight`, and live `Search`/`Highlight` handlers inside `ToolsPopupContent`)
+  - `app/src/main/java/com/example/ui/screens/MainMapScreen.kt` (rendered `SelectedPoiHighlightBanner` when appropriate, synced controller highlight state across recomposition, and wired POI callbacks without altering `MapView` instantiation or `DisposableEffect`)
+  - `app/src/test/java/com/example/ExampleUnitTest.kt` (added tests 41–45 covering exact/partial/case/Unicode search, category & subCategory filtering, blank/empty DB/limit/wildcard escaping, duplicate ingestion deduplication, and offline ViewModel + `MapEngineController` highlight handoff)
+  - `BLUEPRINT.md` (marked Phase 4.0 complete and logged changes)
+  - `receipts/RECEIPTS_002.md` (appended Phase 4.0 audit entry)
+* **What was actually done**:
+  - Wired Search & Highlight inside the Compass/Tools menu (`ToolsPopupContent`) rather than Places popup.
+  - Queried local Room `osm_pois` table off the main thread (`Dispatchers.IO`) with 200ms typing debounce, obsolete job cancellation, wildcard escaping, and Unicode case-folding fallback, with zero network calls and zero location permission triggers.
+  - Implemented live MapLibre `GeoJsonSource` + concentric `CircleLayer` highlight marker and camera centering upon result selection, automatically restored across style and composition changes without source/layer duplication.
+  - Added dismissible `SelectedPoiHighlightBanner` and functional `Tools -> Highlight` inspection/toggle/recenter/clear controls while truthfully noting full polygon/zone drawing remains a future milestone.
+* **How it was verified**:
+  - Local JVM unit test suite via `gradle :app:testDebugUnitTest`: `TEST-com.example.ExampleUnitTest.xml` reported 45/45 tests passed (`skipped="0"`, `failures="0"`, `errors="0"`, BUILD SUCCESSFUL in 56s).
+  - Container applet compilation via `compile_applet`: Build succeeded.
+  - On-device verification: Not tested on physical Android hardware in this environment (container has no emulator/ADB; physical-device acceptance steps provided).
+* **Deviations from request**: None.
+* **Known issues / follow-up**: Physical-device verification of live tile POI ingestion, MapLibre GL circle highlight rendering across styles, and airplane-mode search needs manual verification using the provided acceptance guide. General polygon/area highlight drawing remains planned for a future milestone.
+
