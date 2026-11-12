@@ -90,7 +90,6 @@ class MapEngineController(
         styleDef: MapStyleDefinition,
         onStatusChanged: ((status: MapEngineStatus, stageDescription: String?, error: String?) -> Unit)? = null
     ) {
-        this.currentStyleDefinition = styleDef
         val map = maplibreMap ?: run {
             onStatusChanged?.invoke(
                 MapEngineStatus.WAITING_FOR_MAP_VIEW,
@@ -99,6 +98,23 @@ class MapEngineController(
             )
             return
         }
+
+        val activeStyle = map.style
+        if (activeStyle != null && activeStyle.isFullyLoaded && currentStyleDefinition?.id == styleDef.id) {
+            // Style is already fully loaded and active. Avoid redundant reloads and shader recompilation.
+            currentComposition?.let { comp ->
+                applyCompositionOverlays(activeStyle, comp)
+            }
+            onStatusChanged?.invoke(
+                MapEngineStatus.STYLE_READY,
+                "Style loaded: ${styleDef.displayName} (${activeStyle.layers.size} layers)",
+                null
+            )
+            visibleTileCoordinator.onCameraSettled(map, styleDef)
+            return
+        }
+
+        this.currentStyleDefinition = styleDef
 
         DiagnosticRepository.log(
             severity = LogSeverity.INFO,

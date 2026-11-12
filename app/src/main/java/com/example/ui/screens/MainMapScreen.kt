@@ -369,6 +369,7 @@ fun MainMapScreen(
                         mapView.onLowMemory()
                         DiagnosticRepository.log(LogSeverity.WARNING, "MainMapScreen", "Forwarded onLowMemory() to MapView#$mvId", stage = "LOW_MEMORY")
                     }
+                    @Suppress("DEPRECATION")
                     override fun onTrimMemory(level: Int) {
                         if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
                             mapView.onLowMemory()
@@ -534,9 +535,6 @@ fun MainMapScreen(
                 connectionType = connectionType,
                 onSelectStyle = { style ->
                     viewModel.selectStyle(style)
-                    controller.loadStyle(style) { status, desc, err ->
-                        viewModel.onMapStatusChanged(status, desc, err)
-                    }
                 },
                 onSelectComposition = { comp ->
                     viewModel.selectComposition(comp, controller)

@@ -277,7 +277,7 @@ class VisibleTileCoordinator(
         val isAntimeridianCrossed = nearL != null && nearR != null && nearL.longitude > nearR.longitude
 
         val n = 1 shl zoom
-        val (minX, maxX) = if (isAntimeridianCrossed && nearL != null && nearR != null) {
+        val (minX, maxX) = if (isAntimeridianCrossed) {
             val startX = floor((nearL.longitude.coerceIn(-180.0, 180.0) + 180.0) / 360.0 * n).toInt().coerceIn(0, n - 1)
             val endX = floor((nearR.longitude.coerceIn(-180.0, 180.0) + 180.0) / 360.0 * n).toInt().coerceIn(0, n - 1)
             Pair(startX, endX)

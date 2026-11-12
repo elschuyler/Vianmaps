@@ -761,6 +761,12 @@ fun MapCatalogueWorkspace(
                 SettingsInfoRow(label = "Routing Tiles", value = "${report.routingStorage.downloadedTiles} active tiles")
                 SettingsInfoRow(label = "Routing Disk Size", value = report.routingStorage.formattedSize)
                 SettingsInfoRow(label = "Coverage Status", value = report.routingStorage.status)
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Valhalla 3-level graph tiles provide spatial index coverage. Full turn-by-turn routing calculation requires an active routing engine (planned for future milestone).",
+                    fontSize = 10.sp,
+                    color = TextDarkMuted
+                )
             }
         } else {
             SettingsSectionCard {

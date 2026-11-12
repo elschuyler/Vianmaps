@@ -200,3 +200,29 @@ This file series is the project's permanent audit trail across sessions. Each fi
   - On-device claim only: not tested on physical hardware in this turn (verified via JVM unit test suite and compilation).
 * **Deviations from request**: None.
 * **Known issues / follow-up**: None. Ready for on-device manual QA.
+---
+
+### Entry 2026-11-11T22:04:00Z — Phase 3.7: Stability, UX & Completeness Pass
+* **Summary**: Eliminate redundant map style initialization and shader churn; simplify style loading to a single ViewModel-coordinated trigger; suppress deprecated memory callback warnings; upgrade Places popup rows to interactive navigation leading to Memory Palace; expand MemoryPalaceContent into a 4-tab local spatial records workspace; clarify offline routing graph index vs turn-by-turn routing calculation; add informative future milestone badges to Tool placeholders.
+* **Exact files touched**:
+  - `app/src/main/java/com/example/map/engine/MapEngineController.kt` (added fast-path guard in `loadStyle` when active style is fully loaded and IDs match)
+  - `app/src/main/java/com/example/map/acquisition/VisibleTileCoordinator.kt` (simplified antimeridian condition to eliminate redundant null check warning)
+  - `app/src/main/java/com/example/ui/screens/MainMapScreen.kt` (suppressed deprecated `TRIM_MEMORY_RUNNING_LOW` warning; removed duplicate `controller.loadStyle` call in `onSelectStyle` callback)
+  - `app/src/main/java/com/example/ui/components/AppModalManager.kt` (added forward chevron and click handler to `PlaceItemRow`; made Placemarks, Routes, and Notes clickable to open `MemoryPalaceWorkspace`; expanded `MemoryPalaceContent` into 4-tab workspace [Overview, Placemarks, Routes, Notes]; updated display and routing status in `MoreSettingsWorkspace`; added "Future Milestone" badge and domain-specific architectural notes to `ToolPlaceholderContent`)
+  - `app/src/main/java/com/example/data/storage/StorageCalculationManager.kt` (truthfully labeled routing graph tile status as spatial index with engine planned)
+  - `app/src/main/java/com/example/ui/components/MapCatalogueWorkspace.kt` (added footnote distinguishing routing graph spatial indexing from a turn-by-turn routing engine)
+  - `BLUEPRINT.md` (updated development phases and change ledger for Phase 3.7)
+  - `receipts/RECEIPTS_002.md` (appended Phase 3.7 audit entry)
+* **What was actually done**:
+  - Eliminating duplicate style initialization: In `MapEngineController.loadStyle`, added a fast-path check: if `map.style` exists, is fully loaded, and matches `currentStyleDefinition?.id`, it reapplies overlay visibilities/opacity, notifies `STYLE_READY`, and settles tiles without reloading the style JSON or recreating OpenGL shader pipelines. In `MainMapScreen.kt`, simplified `onSelectStyle` to delegate to `viewModel.selectStyle(style)`, allowing the single `LaunchedEffect(uiState.currentStyle.id)` to coordinate the map engine loading.
+  - Compiler warning cleanups: Suppressed deprecation on `ComponentCallbacks2.onTrimMemory` in `MainMapScreen.kt` and eliminated redundant null checks in `VisibleTileCoordinator.kt`.
+  - Upgrading Places & Memory Palace UX: Converted `PlacesPopupContent`'s three inert cards into interactive clickable rows with forward navigation chevrons, directly routing into the Memory Palace workspace. Replaced the 4-line placeholder in `MemoryPalaceContent` with a comprehensive 4-tab spatial inventory workspace (`Overview`, `Placemarks`, `Routes`, `Notes`) featuring local Room SQLite statistics, zero-cloud architectural guarantees, and clear distinctions between GPS route tracks and routing engine graphs.
+  - Offline routing truthfulness: Explicitly stated across `StorageCalculationManager.kt`, `MapCatalogueWorkspace.kt`, and `AppModalManager.kt` that Valhalla 3-level graph tiles provide spatial index coverage, while full turn-by-turn routing calculation requires an active routing engine planned for a future milestone.
+  - Tool placeholders completeness: Enhanced `ToolPlaceholderContent` with a "Future Milestone" badge and truthful descriptions of how offline search uses Room SQLite POIs, navigation uses sensor compass waypoints, and measurement uses WGS84 geodesics.
+* **How it was verified**:
+  - Verified local JVM unit test suite via `gradle :app:testDebugUnitTest`: all 40/40 tests passed (BUILD SUCCESSFUL in 12s, 100% success rate).
+  - Verified container build via `compile_applet` tool: Build succeeded in 10s.
+  - On-device claim only: not tested on physical hardware in this turn (verified via JVM unit test suite and compilation).
+* **Deviations from request**: None.
+* **Known issues / follow-up**: None. Ready for on-device manual QA.
+

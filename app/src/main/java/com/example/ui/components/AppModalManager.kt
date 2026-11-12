@@ -23,6 +23,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
@@ -40,6 +41,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
@@ -605,11 +607,13 @@ fun PlacesPopupContent(
         }
         Spacer(modifier = Modifier.height(3.dp))
 
-        PlaceItemRow(title = "Placemarks", icon = Icons.Default.PinDrop, subtitle = "0 saved landmarks")
-        PlaceItemRow(title = "Routes", icon = Icons.Default.Route, subtitle = "0 recorded trails")
-        PlaceItemRow(title = "Notes", icon = Icons.Default.Description, subtitle = "Spatial map notes")
+        PlaceItemRow(title = "Placemarks", icon = Icons.Default.PinDrop, subtitle = "0 saved landmarks", onClick = onOpenMemoryPalace)
+        Spacer(modifier = Modifier.height(2.dp))
+        PlaceItemRow(title = "Routes", icon = Icons.Default.Route, subtitle = "0 recorded trails", onClick = onOpenMemoryPalace)
+        Spacer(modifier = Modifier.height(2.dp))
+        PlaceItemRow(title = "Notes", icon = Icons.Default.Description, subtitle = "Spatial map notes", onClick = onOpenMemoryPalace)
 
-        Spacer(modifier = Modifier.height(3.dp))
+        Spacer(modifier = Modifier.height(4.dp))
         Button(
             onClick = onOpenMemoryPalace,
             colors = ButtonDefaults.buttonColors(
@@ -627,21 +631,33 @@ fun PlacesPopupContent(
 }
 
 @Composable
-private fun PlaceItemRow(title: String, icon: ImageVector, subtitle: String) {
+private fun PlaceItemRow(
+    title: String,
+    icon: ImageVector,
+    subtitle: String,
+    onClick: () -> Unit
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
             .background(SurfaceOffWhite)
-            .padding(horizontal = 8.dp, vertical = 2.dp),
+            .clickable(onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Icon(icon, contentDescription = null, tint = SkyBluePrimary, modifier = Modifier.size(18.dp))
         Spacer(modifier = Modifier.width(10.dp))
-        Column {
+        Column(modifier = Modifier.weight(1f)) {
             Text(title, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = TextDarkPrimary)
             Text(subtitle, fontSize = 10.sp, color = TextDarkSecondary)
         }
+        Icon(
+            imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+            contentDescription = "Open $title",
+            tint = TextDarkSecondary.copy(alpha = 0.5f),
+            modifier = Modifier.size(14.dp)
+        )
     }
 }
 
@@ -765,7 +781,7 @@ fun MoreSettingsWorkspace(onOpenMapCatalogue: () -> Unit = {}) {
             SettingsInfoRow(label = "Native Engine", value = "MapLibre Native Android v13.7.1")
             SettingsInfoRow(label = "Projection", value = "2D Orthographic MapView")
             SettingsInfoRow(label = "Default Base Style", value = "Satellite Hybrid (ESRI + OSM Vector)")
-            SettingsInfoRow(label = "Display Calibration", value = "Milestone 2 Foundation")
+            SettingsInfoRow(label = "Display Calibration", value = "Standard System Display")
         }
 
         Spacer(modifier = Modifier.height(14.dp))
@@ -797,7 +813,7 @@ fun MoreSettingsWorkspace(onOpenMapCatalogue: () -> Unit = {}) {
             Spacer(modifier = Modifier.height(6.dp))
             SettingsInfoRow(label = "Retention Mode", value = "Tile-by-tile visible retention")
             SettingsInfoRow(label = "Database Engine", value = "Room SQLite (Deduplicated)")
-            SettingsInfoRow(label = "Routing Hierarchy", value = "Valhalla 3-level graph coverage")
+            SettingsInfoRow(label = "Routing Engine", value = "Graph index prepared (Engine planned)")
             SettingsInfoRow(label = "Ambient Disk Cache", value = "500 MB quota (No bulk packs)")
         }
 
@@ -1011,11 +1027,155 @@ private fun BulletPointText(title: String, description: String) {
 
 @Composable
 fun MemoryPalaceContent() {
-    Column {
-        Text("Memory Palace Workspace (Starting in Notes)", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = TextDarkPrimary)
+    var selectedTab by remember { mutableIntStateOf(0) }
+    val tabTitles = listOf("Overview", "Placemarks", "Routes", "Notes")
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+    ) {
+        Text(
+            text = "Memory Palace & Spatial Records",
+            fontSize = 18.sp,
+            fontWeight = FontWeight.Bold,
+            color = TextDarkPrimary
+        )
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            text = "Local-first spatial inventory and geographic notes bound to Room SQLite database.",
+            fontSize = 12.sp,
+            color = TextDarkSecondary
+        )
         Spacer(modifier = Modifier.height(12.dp))
-        Text("Milestone 1 Placeholder:", fontWeight = FontWeight.SemiBold, color = SkyBluePrimary)
-        Text("The full Spatial Notes and Memory Palace editor will be implemented in future milestones. Structured records will bind directly to the shared Room database.", fontSize = 12.sp, color = TextDarkSecondary)
+
+        TabRow(
+            selectedTabIndex = selectedTab,
+            containerColor = SurfaceOffWhite,
+            contentColor = SkyBluePrimary,
+            modifier = Modifier.clip(RoundedCornerShape(8.dp))
+        ) {
+            tabTitles.forEachIndexed { index, title ->
+                Tab(
+                    selected = selectedTab == index,
+                    onClick = { selectedTab = index },
+                    text = {
+                        Text(
+                            text = title,
+                            fontSize = 12.sp,
+                            fontWeight = if (selectedTab == index) FontWeight.Bold else FontWeight.Normal,
+                            color = if (selectedTab == index) SkyBluePrimary else TextDarkSecondary
+                        )
+                    }
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(14.dp))
+
+        when (selectedTab) {
+            0 -> {
+                SettingsSectionCard {
+                    Text("Spatial Inventory Summary", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = TextDarkPrimary)
+                    Spacer(modifier = Modifier.height(6.dp))
+                    SettingsInfoRow(label = "Saved Placemarks", value = "0 records")
+                    SettingsInfoRow(label = "Recorded Routes", value = "0 trails")
+                    SettingsInfoRow(label = "Spatial Notes", value = "0 annotations")
+                    SettingsInfoRow(label = "Local Storage Engine", value = "Room SQLite (Local-first)")
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+                SettingsSectionCard {
+                    Text("Architectural Guarantees", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = TextDarkPrimary)
+                    Spacer(modifier = Modifier.height(6.dp))
+                    BulletPointText(
+                        title = "Zero Cloud Leakage",
+                        description = "All coordinates, pins, and personal map notes reside exclusively on your physical device storage."
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    BulletPointText(
+                        title = "Tile Cache Independence",
+                        description = "User spatial records are decoupled from tile caches. Purging map tile caches never modifies or deletes your places."
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    BulletPointText(
+                        title = "Route Tracks vs. Routing Engine",
+                        description = "Saved routes record your actual GPS travel geometry. Turn-by-turn routing calculation requires an active routing engine (planned in future milestones)."
+                    )
+                }
+            }
+            1 -> {
+                SettingsSectionCard {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Saved Placemarks", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = TextDarkPrimary)
+                        Surface(color = SkyBlueDim, shape = RoundedCornerShape(4.dp)) {
+                            Text("0 Items", fontSize = 10.sp, color = SkyBluePrimary, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "No saved placemarks yet. Tap on any coordinate or POI on the main map to bookmark locations as named waypoints.",
+                        fontSize = 12.sp,
+                        color = TextDarkSecondary,
+                        lineHeight = 16.sp
+                    )
+                }
+            }
+            2 -> {
+                SettingsSectionCard {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Recorded Route Tracks", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = TextDarkPrimary)
+                        Surface(color = SkyBlueDim, shape = RoundedCornerShape(4.dp)) {
+                            Text("0 Tracks", fontSize = 10.sp, color = SkyBluePrimary, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "No GPS route tracks recorded yet. Track recording logs breadcrumb coordinate geometry directly to local storage.",
+                        fontSize = 12.sp,
+                        color = TextDarkSecondary,
+                        lineHeight = 16.sp
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Note: Saved routes represent recorded geometry, not an offline turn-by-turn routing graph calculation.",
+                        fontSize = 11.sp,
+                        color = TextDarkMuted,
+                        lineHeight = 15.sp
+                    )
+                }
+            }
+            3 -> {
+                SettingsSectionCard {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Spatial Field Notes", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = TextDarkPrimary)
+                        Surface(color = SkyBlueDim, shape = RoundedCornerShape(4.dp)) {
+                            Text("0 Notes", fontSize = 10.sp, color = SkyBluePrimary, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "No spatial notes recorded. The Memory Palace editor lets you attach field observations, terrain photos, and descriptions to exact geographic coordinates.",
+                        fontSize = 12.sp,
+                        color = TextDarkSecondary,
+                        lineHeight = 16.sp
+                    )
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
     }
 }
 
@@ -1027,14 +1187,45 @@ fun ToolPlaceholderContent(name: String, description: String, onClose: () -> Uni
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(name, fontSize = 15.sp, fontWeight = FontWeight.Bold, color = TextDarkPrimary)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(name, fontSize = 15.sp, fontWeight = FontWeight.Bold, color = TextDarkPrimary)
+                Spacer(modifier = Modifier.width(8.dp))
+                Surface(
+                    color = SkyBlueDim,
+                    shape = RoundedCornerShape(4.dp)
+                ) {
+                    Text(
+                        text = "Future Milestone",
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = SkyBluePrimary,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                    )
+                }
+            }
             IconButton(onClick = onClose, modifier = Modifier.size(28.dp)) {
                 Icon(Icons.Default.Close, contentDescription = "Close", tint = TextDarkSecondary, modifier = Modifier.size(18.dp))
             }
         }
         Spacer(modifier = Modifier.height(8.dp))
         Text(description, fontSize = 12.sp, color = TextDarkSecondary)
-        Spacer(modifier = Modifier.height(12.dp))
-        Text("Feature scheduled for upcoming release phase. Clean architecture boundaries and repository bindings are in place.", fontSize = 11.sp, color = SkyBlueDim)
+        Spacer(modifier = Modifier.height(10.dp))
+
+        val detailedNote = when (name.lowercase()) {
+            "search" -> "Offline search will query cached OpenStreetMap POIs, addresses, and custom Placemarks directly from the local Room database."
+            "navigate" -> "Navigation displays sensor compass azimuth and bearing waypoints. Turn-by-turn routing calculation requires a routing engine graph."
+            "measure" -> "Calculates geodesic distances and polygon surface areas using WGS84 ellipsoidal geometry."
+            "highlight" -> "Allows defining polygonal bounding areas and geographic zones on top of active vector tiles."
+            "weather" -> "Atmospheric pressure and local barometric sensor readings will display alongside weather tile layers."
+            "field tools" -> "Grid offsets, MGRS/UTM coordinate conversions, and compass resection markers for field work."
+            else -> "Feature scheduled for upcoming release phase. Clean architecture boundaries and repository bindings are in place."
+        }
+
+        Text(
+            text = detailedNote,
+            fontSize = 11.sp,
+            color = TextDarkSecondary,
+            lineHeight = 15.sp
+        )
     }
 }

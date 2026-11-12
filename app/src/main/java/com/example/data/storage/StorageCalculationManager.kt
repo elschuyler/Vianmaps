@@ -602,7 +602,7 @@ object StorageCalculationManager {
             downloadedTiles = downloadedRoutingTiles,
             byteSize = routingBytes,
             formattedSize = formatBytes(routingBytes),
-            status = if (downloadedRoutingTiles > 0) "$downloadedRoutingTiles graph tiles active" else "Not configured (0 bytes)"
+            status = if (downloadedRoutingTiles > 0) "$downloadedRoutingTiles graph tiles indexed (Engine planned)" else "No offline routing graph (Turn-by-turn engine planned)"
         )
 
         // 4. Overall total - truthful physical byte sum
