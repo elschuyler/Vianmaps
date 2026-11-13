@@ -1,20 +1,22 @@
 package com.example.data.db
 
 /**
- * Shared Database Architecture Boundary for future modules (Places, Notes, Routes, Tools).
+ * Shared Database Architecture Boundary for Vian Maps local-first modules.
  *
- * NOTE: The product direction is one shared local Room database for structured
- * user-owned records. Per project instructions, avoid premature schemas until
- * those record workflows are implemented. This boundary documents and reserves
- * the single database identifier and migration path.
+ * All structured user-owned records (Places, Placemarks, Saved Routes, Waypoints)
+ * share this single persistent SQLite database alongside cached OSM feature indices,
+ * keeping user records cleanly separated from disposable tile caches and upgraded
+ * through explicit Room schema migrations.
  */
 object AppDatabaseContract {
     const val DATABASE_NAME = "map_app_master.db"
-    const val CURRENT_VERSION = 1
+    const val CURRENT_VERSION = 2
 
-    // Future shared tables:
-    // - placemarks_table
-    // - routes_table
-    // - spatial_notes_table
-    // - memory_palace_table
+    // Active shared tables (v2):
+    // - retained_tiles
+    // - osm_pois, osm_buildings, osm_regions, osm_roads
+    // - routing_graph_tiles
+    // - user_places (Shared Place & Placemark records)
+    // - saved_routes (Ordered user-created route geometry)
+    // - route_waypoints (Ordered waypoints linked to saved_routes / optional user_places)
 }

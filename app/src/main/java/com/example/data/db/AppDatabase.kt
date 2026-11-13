@@ -3,13 +3,20 @@ package com.example.data.db
 import android.content.Context
 import androidx.room.Dao
 import androidx.room.Database
+import androidx.room.Embedded
 import androidx.room.Entity
+import androidx.room.ForeignKey
+import androidx.room.Index
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.PrimaryKey
 import androidx.room.Query
+import androidx.room.Relation
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.Transaction
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
 
 @Entity(
@@ -261,6 +268,168 @@ interface RoutingGraphTileDao {
     suspend fun getDownloadedTileCount(): Int
 }
 
+@Entity(
+    tableName = "user_places",
+    indices = [
+        Index(value = ["isPlacemark"]),
+        Index(value = ["updatedAt"])
+    ]
+)
+data class UserPlaceEntity(
+    @PrimaryKey val id: String,
+    val name: String,
+    val latitude: Double,
+    val longitude: Double,
+    val description: String = "",
+    val addressLabel: String? = null,
+    val category: String = "placemark",
+    val tagsCsv: String = "",
+    val isPlacemark: Boolean = true,
+    val linkedModuleRef: String? = null,
+    val createdAt: Long = System.currentTimeMillis(),
+    val updatedAt: Long = System.currentTimeMillis()
+)
+
+@Dao
+interface UserPlaceDao {
+    @Query("SELECT * FROM user_places WHERE isPlacemark = 1 ORDER BY updatedAt DESC")
+    fun observePlacemarks(): Flow<List<UserPlaceEntity>>
+
+    @Query("SELECT * FROM user_places ORDER BY updatedAt DESC")
+    fun observeAllPlaces(): Flow<List<UserPlaceEntity>>
+
+    @Query("SELECT * FROM user_places WHERE id = :id LIMIT 1")
+    suspend fun getPlaceById(id: String): UserPlaceEntity?
+
+    @Query("SELECT * FROM user_places WHERE isPlacemark = 1 ORDER BY updatedAt DESC")
+    suspend fun getAllPlacemarksOnce(): List<UserPlaceEntity>
+
+    @Query(
+        """
+        SELECT * FROM user_places
+        WHERE latitude BETWEEN :minLat AND :maxLat
+          AND longitude BETWEEN :minLng AND :maxLng
+        ORDER BY updatedAt DESC
+        """
+    )
+    suspend fun getNearbyPlaces(
+        minLat: Double,
+        maxLat: Double,
+        minLng: Double,
+        maxLng: Double
+    ): List<UserPlaceEntity>
+
+    @Query("SELECT COUNT(*) FROM user_places WHERE isPlacemark = 1")
+    suspend fun getPlacemarkCount(): Int
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertPlace(place: UserPlaceEntity)
+
+    @Query("DELETE FROM user_places WHERE id = :id")
+    suspend fun deletePlaceById(id: String): Int
+
+    @Query("DELETE FROM user_places")
+    suspend fun clearAllPlaces()
+}
+
+@Entity(
+    tableName = "saved_routes",
+    indices = [Index(value = ["updatedAt"])]
+)
+data class SavedRouteEntity(
+    @PrimaryKey val id: String,
+    val name: String,
+    val description: String = "",
+    val geometryJson: String,
+    val pointCount: Int,
+    val totalDistanceMeters: Double,
+    val createdAt: Long = System.currentTimeMillis(),
+    val updatedAt: Long = System.currentTimeMillis()
+)
+
+@Entity(
+    tableName = "route_waypoints",
+    foreignKeys = [
+        ForeignKey(
+            entity = SavedRouteEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["routeId"],
+            onDelete = ForeignKey.CASCADE
+        ),
+        ForeignKey(
+            entity = UserPlaceEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["placeId"],
+            onDelete = ForeignKey.SET_NULL
+        )
+    ],
+    indices = [
+        Index(value = ["routeId"]),
+        Index(value = ["placeId"])
+    ]
+)
+data class RouteWaypointEntity(
+    @PrimaryKey val id: String,
+    val routeId: String,
+    val placeId: String? = null,
+    val orderIndex: Int,
+    val name: String,
+    val latitude: Double,
+    val longitude: Double,
+    val notes: String = "",
+    val createdAt: Long = System.currentTimeMillis()
+)
+
+data class SavedRouteWithWaypoints(
+    @Embedded val route: SavedRouteEntity,
+    @Relation(
+        parentColumn = "id",
+        entityColumn = "routeId"
+    )
+    val waypoints: List<RouteWaypointEntity>
+)
+
+@Dao
+interface SavedRouteDao {
+    @Transaction
+    @Query("SELECT * FROM saved_routes ORDER BY updatedAt DESC")
+    fun observeRoutesWithWaypoints(): Flow<List<SavedRouteWithWaypoints>>
+
+    @Transaction
+    @Query("SELECT * FROM saved_routes WHERE id = :routeId LIMIT 1")
+    suspend fun getRouteWithWaypoints(routeId: String): SavedRouteWithWaypoints?
+
+    @Query("SELECT COUNT(*) FROM saved_routes")
+    suspend fun getRouteCount(): Int
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertRoute(route: SavedRouteEntity)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertWaypoints(waypoints: List<RouteWaypointEntity>)
+
+    @Query("DELETE FROM route_waypoints WHERE routeId = :routeId")
+    suspend fun deleteWaypointsForRoute(routeId: String)
+
+    @Query("DELETE FROM saved_routes WHERE id = :routeId")
+    suspend fun deleteRouteById(routeId: String): Int
+
+    @Query("DELETE FROM saved_routes")
+    suspend fun clearAllRoutes()
+
+    @Transaction
+    suspend fun saveRouteWithWaypoints(
+        route: SavedRouteEntity,
+        waypoints: List<RouteWaypointEntity>
+    ) {
+        upsertRoute(route)
+        deleteWaypointsForRoute(route.id)
+        if (waypoints.isNotEmpty()) {
+            insertWaypoints(waypoints)
+        }
+    }
+}
+
 @Database(
     entities = [
         RetainedTileEntity::class,
@@ -268,7 +437,10 @@ interface RoutingGraphTileDao {
         OsmBuildingRecord::class,
         OsmRegionRecord::class,
         OsmRoadRecord::class,
-        RoutingGraphTileRecord::class
+        RoutingGraphTileRecord::class,
+        UserPlaceEntity::class,
+        SavedRouteEntity::class,
+        RouteWaypointEntity::class
     ],
     version = AppDatabaseContract.CURRENT_VERSION,
     exportSchema = false
@@ -280,10 +452,76 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun osmRegionDao(): OsmRegionDao
     abstract fun osmRoadDao(): OsmRoadDao
     abstract fun routingGraphTileDao(): RoutingGraphTileDao
+    abstract fun userPlaceDao(): UserPlaceDao
+    abstract fun savedRouteDao(): SavedRouteDao
 
     companion object {
         @Volatile
         private var instance: AppDatabase? = null
+
+        val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `user_places` (
+                        `id` TEXT NOT NULL,
+                        `name` TEXT NOT NULL,
+                        `latitude` REAL NOT NULL,
+                        `longitude` REAL NOT NULL,
+                        `description` TEXT NOT NULL,
+                        `addressLabel` TEXT,
+                        `category` TEXT NOT NULL,
+                        `tagsCsv` TEXT NOT NULL,
+                        `isPlacemark` INTEGER NOT NULL,
+                        `linkedModuleRef` TEXT,
+                        `createdAt` INTEGER NOT NULL,
+                        `updatedAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`id`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_user_places_isPlacemark` ON `user_places` (`isPlacemark`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_user_places_updatedAt` ON `user_places` (`updatedAt`)")
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `saved_routes` (
+                        `id` TEXT NOT NULL,
+                        `name` TEXT NOT NULL,
+                        `description` TEXT NOT NULL,
+                        `geometryJson` TEXT NOT NULL,
+                        `pointCount` INTEGER NOT NULL,
+                        `totalDistanceMeters` REAL NOT NULL,
+                        `createdAt` INTEGER NOT NULL,
+                        `updatedAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`id`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_saved_routes_updatedAt` ON `saved_routes` (`updatedAt`)")
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `route_waypoints` (
+                        `id` TEXT NOT NULL,
+                        `routeId` TEXT NOT NULL,
+                        `placeId` TEXT,
+                        `orderIndex` INTEGER NOT NULL,
+                        `name` TEXT NOT NULL,
+                        `latitude` REAL NOT NULL,
+                        `longitude` REAL NOT NULL,
+                        `notes` TEXT NOT NULL,
+                        `createdAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`id`),
+                        FOREIGN KEY(`routeId`) REFERENCES `saved_routes`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE,
+                        FOREIGN KEY(`placeId`) REFERENCES `user_places`(`id`) ON UPDATE NO ACTION ON DELETE SET NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_route_waypoints_routeId` ON `route_waypoints` (`routeId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_route_waypoints_placeId` ON `route_waypoints` (`placeId`)")
+            }
+        }
 
         fun getInstance(context: Context): AppDatabase {
             return instance ?: synchronized(this) {
@@ -292,8 +530,9 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     AppDatabaseContract.DATABASE_NAME
                 )
-                .fallbackToDestructiveMigration(false)
-                .build().also { instance = it }
+                    .addMigrations(MIGRATION_1_2)
+                    .fallbackToDestructiveMigration(false)
+                    .build().also { instance = it }
             }
         }
     }

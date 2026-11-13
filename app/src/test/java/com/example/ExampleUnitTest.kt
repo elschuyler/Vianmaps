@@ -19,6 +19,17 @@ import com.example.map.source.MapSourceRepository
 import com.example.network.AppNetworkPolicy
 import kotlinx.coroutines.runBlocking
 import android.app.Application
+import android.database.sqlite.SQLiteDatabase
+import androidx.room.Room
+import com.example.data.db.RouteWaypointEntity
+import com.example.data.db.SavedRouteEntity
+import com.example.data.db.UserPlaceEntity
+import com.example.data.places.CreatePlaceOutcome
+import com.example.data.places.PlacesAndRoutesRepository
+import com.example.data.places.RouteGeometryCodec
+import com.example.data.places.RoutePoint
+import com.example.data.places.RouteWaypointDraft
+import com.example.data.storage.StorageCalculationManager
 import com.example.ui.screens.ActiveModal
 import com.example.ui.screens.MapViewModel
 import org.junit.Assert.assertEquals
@@ -1380,5 +1391,495 @@ class ExampleUnitTest {
 
         db.osmPoiDao().clearAllPois()
         AppNetworkPolicy.setInternetEnabled(true)
+    }
+
+    @Test
+    fun test46_verifyUserPlaceAndPlacemarkCrudAndDuplicateLocationPolicy(): Unit = runBlocking {
+        val db = AppDatabase.getInstance(context)
+        db.savedRouteDao().clearAllRoutes()
+        db.userPlaceDao().clearAllPlaces()
+        val repo = PlacesAndRoutesRepository(context)
+
+        // 1. Create Placemark
+        val firstOutcome = repo.createPlacemark(
+            name = "Summit Cairn",
+            latitude = 39.9208,
+            longitude = 32.8541,
+            description = "Stone marker at ridge trailhead",
+            addressLabel = "Ridge Trail",
+            category = "landmark",
+            tags = listOf("summit", "trail", "summit")
+        )
+        assertTrue(firstOutcome is CreatePlaceOutcome.Created)
+        val created = (firstOutcome as CreatePlaceOutcome.Created).place
+        assertTrue(created.id.startsWith("place_"))
+        assertEquals("Summit Cairn", created.name)
+        assertEquals("summit, trail", created.tagsCsv)
+
+        // Read back from Room
+        val loaded = repo.getPlacemarkById(created.id)
+        assertNotNull(loaded)
+        assertEquals(created.id, loaded!!.id)
+        assertEquals(1, db.userPlaceDao().getPlacemarkCount())
+
+        // 2. Duplicate within ~5 meters is flagged cleanly rather than silently merged
+        val duplicateOutcome = repo.createPlacemark(
+            name = "Nearby Cache",
+            latitude = 39.92083,
+            longitude = 32.85413,
+            allowDuplicateLocation = false
+        )
+        assertTrue(duplicateOutcome is CreatePlaceOutcome.DuplicateNearby)
+        assertEquals(created.id, (duplicateOutcome as CreatePlaceOutcome.DuplicateNearby).existing.id)
+
+        // Explicit save separate copy creates a second distinct record without merging
+        val separateOutcome = repo.createPlacemark(
+            name = "Nearby Cache",
+            latitude = 39.92083,
+            longitude = 32.85413,
+            allowDuplicateLocation = true
+        )
+        assertTrue(separateOutcome is CreatePlaceOutcome.Created)
+        val second = (separateOutcome as CreatePlaceOutcome.Created).place
+        assertFalse(created.id == second.id)
+        assertEquals(2, db.userPlaceDao().getPlacemarkCount())
+
+        // 3. Edit Placemark preserves id and createdAt
+        val updatedResult = repo.updatePlacemark(
+            placeId = created.id,
+            name = "Summit Cairn North",
+            description = "Updated description",
+            category = "viewpoint",
+            tags = listOf("vista")
+        )
+        assertTrue(updatedResult.isSuccess)
+        val updated = updatedResult.getOrThrow()
+        assertEquals(created.id, updated.id)
+        assertEquals(created.createdAt, updated.createdAt)
+        assertEquals("Summit Cairn North", updated.name)
+        assertEquals("viewpoint", updated.category)
+
+        // 4. Delete both
+        assertTrue(repo.deletePlacemark(created.id))
+        assertTrue(repo.deletePlacemark(second.id))
+        assertEquals(0, db.userPlaceDao().getPlacemarkCount())
+        assertNull(repo.getPlacemarkById(created.id))
+    }
+
+    @Test
+    fun test47_verifySavedRouteAndOrderedWaypointPersistence(): Unit = runBlocking {
+        val db = AppDatabase.getInstance(context)
+        db.savedRouteDao().clearAllRoutes()
+        db.userPlaceDao().clearAllPlaces()
+        val repo = PlacesAndRoutesRepository(context)
+
+        val placeOutcome = repo.createPlacemark(
+            name = "Trailhead Gate",
+            latitude = 39.9100,
+            longitude = 32.8400
+        ) as CreatePlaceOutcome.Created
+
+        val points = listOf(
+            RoutePoint(39.9100, 32.8400),
+            RoutePoint(39.9150, 32.8450),
+            RoutePoint(39.9200, 32.8500)
+        )
+        val waypoints = listOf(
+            RouteWaypointDraft(placeId = placeOutcome.place.id, name = "Start Gate", latitude = 39.9100, longitude = 32.8400),
+            RouteWaypointDraft(name = "Stream Crossing", latitude = 39.9150, longitude = 32.8450),
+            RouteWaypointDraft(name = "Lookout", latitude = 39.9200, longitude = 32.8500)
+        )
+
+        val savedResult = repo.saveRoute(
+            name = "Morning Ridge Loop",
+            description = "Custom polyline geometry",
+            points = points,
+            waypoints = waypoints
+        )
+        assertTrue(savedResult.isSuccess)
+        val saved = savedResult.getOrThrow()
+        assertTrue(saved.route.id.startsWith("route_"))
+        assertEquals(3, saved.points.size)
+        assertEquals(3, saved.waypoints.size)
+        assertEquals(listOf(0, 1, 2), saved.waypoints.map { it.orderIndex })
+        assertTrue(saved.route.totalDistanceMeters > 1000.0)
+
+        // Update route preserves route ID & createdAt
+        val renamed = repo.saveRoute(
+            routeId = saved.route.id,
+            name = "Evening Ridge Loop",
+            description = "Renamed loop",
+            points = points,
+            waypoints = waypoints.take(2)
+        ).getOrThrow()
+        assertEquals(saved.route.id, renamed.route.id)
+        assertEquals(saved.route.createdAt, renamed.route.createdAt)
+        assertEquals("Evening Ridge Loop", renamed.route.name)
+        assertEquals(2, repo.getRouteById(saved.route.id)!!.waypoints.size)
+
+        // Deleting linked Place sets placeId to null without deleting route or waypoint
+        assertTrue(repo.deletePlacemark(placeOutcome.place.id))
+        val afterPlaceDelete = repo.getRouteById(saved.route.id)
+        assertNotNull(afterPlaceDelete)
+        assertEquals(2, afterPlaceDelete!!.waypoints.size)
+        assertNull(afterPlaceDelete.waypoints[0].placeId)
+
+        // Deleting route removes route and cascades to waypoints
+        assertTrue(repo.deleteRoute(saved.route.id))
+        assertNull(repo.getRouteById(saved.route.id))
+        assertEquals(0, db.savedRouteDao().getRouteCount())
+    }
+
+    @Test
+    fun test48_verifyMalformedEmptyAndInvalidRouteDataHandling(): Unit = runBlocking {
+        val db = AppDatabase.getInstance(context)
+        db.savedRouteDao().clearAllRoutes()
+        val repo = PlacesAndRoutesRepository(context)
+
+        // Blank name rejected cleanly
+        val blankName = repo.saveRoute(
+            name = "   ",
+            points = listOf(RoutePoint(39.9, 32.8), RoutePoint(39.91, 32.81))
+        )
+        assertTrue(blankName.isFailure)
+
+        // Fewer than 2 valid points / out-of-range coordinates rejected cleanly
+        val singlePoint = repo.saveRoute(
+            name = "Too Short",
+            points = listOf(RoutePoint(39.9, 32.8), RoutePoint(95.0, 200.0), RoutePoint(Double.NaN, 10.0))
+        )
+        assertTrue(singlePoint.isFailure)
+
+        // Malformed geometry JSON safely decoded without throwing
+        val corruptJson = RouteGeometryCodec.decode("{not_an_array")
+        assertTrue(corruptJson.isMalformed)
+        assertTrue(corruptJson.points.isEmpty())
+
+        val partialJson = RouteGeometryCodec.decode(
+            """[{"lat":999.0,"lng":0.0},"bad",{"lat":39.91,"lng":32.84},{"lat":39.92,"lng":32.85}]"""
+        )
+        assertTrue(partialJson.isMalformed)
+        assertEquals(2, partialJson.points.size)
+        assertEquals(39.91, partialJson.points[0].latitude, 1e-6)
+        assertEquals(39.92, partialJson.points[1].latitude, 1e-6)
+    }
+
+    @Test
+    fun test49_verifyDatabaseMigrationV1ToV2PreservesExistingData(): Unit = runBlocking {
+        val dbName = "test_migration_v1_v2_${System.currentTimeMillis()}.db"
+        val dbFile = context.getDatabasePath(dbName)
+        dbFile.parentFile?.mkdirs()
+        if (dbFile.exists()) dbFile.delete()
+
+        // 1. Construct genuine SQLite v1 schema database with pre-existing rows matching exact v1 Room schema
+        val sqliteDb = SQLiteDatabase.openOrCreateDatabase(dbFile, null)
+        sqliteDb.version = 1
+        sqliteDb.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `retained_tiles` (
+                `providerId` TEXT NOT NULL, `category` TEXT NOT NULL, `z` INTEGER NOT NULL,
+                `x` INTEGER NOT NULL, `y` INTEGER NOT NULL, `filePath` TEXT NOT NULL,
+                `byteSize` INTEGER NOT NULL, `checksum` TEXT NOT NULL, `fetchTimestamp` INTEGER NOT NULL,
+                `etag` TEXT, `sourceUrl` TEXT NOT NULL, `attribution` TEXT NOT NULL,
+                `retentionPermission` TEXT NOT NULL, `integrityStatus` TEXT NOT NULL,
+                PRIMARY KEY(`providerId`, `category`, `z`, `x`, `y`)
+            )
+            """.trimIndent()
+        )
+        sqliteDb.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `osm_pois` (
+                `osmId` INTEGER NOT NULL, `name` TEXT NOT NULL, `category` TEXT NOT NULL,
+                `subCategory` TEXT, `latitude` REAL NOT NULL, `longitude` REAL NOT NULL,
+                `sourceTileZ` INTEGER NOT NULL, `sourceTileX` INTEGER NOT NULL, `sourceTileY` INTEGER NOT NULL,
+                `tagsJson` TEXT NOT NULL, `layerName` TEXT NOT NULL, `fetchTimestamp` INTEGER NOT NULL,
+                PRIMARY KEY(`osmId`)
+            )
+            """.trimIndent()
+        )
+        sqliteDb.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `osm_buildings` (
+                `osmId` INTEGER NOT NULL, `name` TEXT, `buildingType` TEXT NOT NULL,
+                `heightMeters` REAL NOT NULL, `minHeightMeters` REAL NOT NULL,
+                `sourceTileZ` INTEGER NOT NULL, `sourceTileX` INTEGER NOT NULL, `sourceTileY` INTEGER NOT NULL,
+                `centroidLat` REAL NOT NULL, `centroidLng` REAL NOT NULL, `geometryJson` TEXT NOT NULL,
+                PRIMARY KEY(`osmId`)
+            )
+            """.trimIndent()
+        )
+        sqliteDb.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `osm_regions` (
+                `osmId` INTEGER NOT NULL, `name` TEXT NOT NULL, `adminLevel` INTEGER NOT NULL,
+                `boundaryType` TEXT NOT NULL,
+                `sourceTileZ` INTEGER NOT NULL, `sourceTileX` INTEGER NOT NULL, `sourceTileY` INTEGER NOT NULL,
+                PRIMARY KEY(`osmId`)
+            )
+            """.trimIndent()
+        )
+        sqliteDb.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `osm_roads` (
+                `osmId` INTEGER NOT NULL, `name` TEXT, `highwayClass` TEXT NOT NULL,
+                `isOneway` INTEGER NOT NULL,
+                `sourceTileZ` INTEGER NOT NULL, `sourceTileX` INTEGER NOT NULL, `sourceTileY` INTEGER NOT NULL,
+                `geometryJson` TEXT NOT NULL,
+                PRIMARY KEY(`osmId`)
+            )
+            """.trimIndent()
+        )
+        sqliteDb.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `routing_graph_tiles` (
+                `level` INTEGER NOT NULL, `tileIndex` INTEGER NOT NULL, `status` TEXT NOT NULL,
+                `filePath` TEXT, `byteSize` INTEGER NOT NULL, `lastChecked` INTEGER NOT NULL,
+                PRIMARY KEY(`level`, `tileIndex`)
+            )
+            """.trimIndent()
+        )
+
+        sqliteDb.execSQL(
+            "INSERT INTO `osm_pois` VALUES (9901, 'Preserved Old Coffee', 'amenity', 'cafe', 39.92, 32.85, 14, 9687, 6199, '{}', 'poi', 1000)"
+        )
+        sqliteDb.execSQL(
+            "INSERT INTO `retained_tiles` VALUES ('openfreemap', 'OSM_VECTOR', 14, 9687, 6199, '/tmp/1.pbf', 512, 'crc1', 1000, NULL, '', '', 'PERMITTED', 'VALID')"
+        )
+        sqliteDb.close()
+
+        // 2. Open with Room + MIGRATION_1_2 (schema validation runs automatically)
+        val migratedDb = Room.databaseBuilder(context, AppDatabase::class.java, dbName)
+            .addMigrations(AppDatabase.MIGRATION_1_2)
+            .allowMainThreadQueries()
+            .build()
+
+        // Assert pre-existing v1 records survived migration 100% intact
+        val preservedPoi = migratedDb.osmPoiDao().getPoiById(9901L)
+        assertNotNull(preservedPoi)
+        assertEquals("Preserved Old Coffee", preservedPoi!!.name)
+        val preservedTile = migratedDb.retainedTileDao().getTile("openfreemap", "OSM_VECTOR", 14, 9687, 6199)
+        assertNotNull(preservedTile)
+
+        // Assert new v2 user_places & saved_routes tables operate cleanly
+        val newPlace = UserPlaceEntity(
+            id = "place_mig_1",
+            name = "Migrated Spot",
+            latitude = 39.93,
+            longitude = 32.86
+        )
+        migratedDb.userPlaceDao().upsertPlace(newPlace)
+        assertEquals(1, migratedDb.userPlaceDao().getPlacemarkCount())
+
+        val newRoute = SavedRouteEntity(
+            id = "route_mig_1",
+            name = "Migrated Route",
+            geometryJson = RouteGeometryCodec.encode(listOf(RoutePoint(39.9, 32.8), RoutePoint(39.91, 32.81))),
+            pointCount = 2,
+            totalDistanceMeters = 1300.0
+        )
+        migratedDb.savedRouteDao().saveRouteWithWaypoints(
+            newRoute,
+            listOf(
+                RouteWaypointEntity(
+                    id = "wp_mig_1",
+                    routeId = "route_mig_1",
+                    placeId = "place_mig_1",
+                    orderIndex = 0,
+                    name = "Origin",
+                    latitude = 39.9,
+                    longitude = 32.8
+                )
+            )
+        )
+        assertEquals(1, migratedDb.savedRouteDao().getRouteCount())
+
+        migratedDb.close()
+        dbFile.delete()
+    }
+
+    @Test
+    fun test50_verifyTileCacheClearingPreservesPlacemarksAndSavedRoutes(): Unit = runBlocking {
+        val db = AppDatabase.getInstance(context)
+        db.savedRouteDao().clearAllRoutes()
+        db.userPlaceDao().clearAllPlaces()
+        db.osmPoiDao().clearAllPois()
+
+        val storageManager = TileStorageManager(context)
+        storageManager.saveTileData(
+            providerId = "openfreemap",
+            category = TileCategory.OSM_VECTOR,
+            z = 12,
+            x = 200,
+            y = 300,
+            data = "DISPOSABLE_VECTOR_TILE_BYTES".toByteArray(),
+            metadata = TileMetadata(providerId = "openfreemap", retentionPermission = "PERMITTED")
+        )
+
+        val repo = PlacesAndRoutesRepository(context)
+        val place = (repo.createPlacemark("Personal Base", 40.0, 29.0) as CreatePlaceOutcome.Created).place
+        val route = repo.saveRoute(
+            name = "Personal Hike",
+            points = listOf(RoutePoint(40.0, 29.0), RoutePoint(40.01, 29.01)),
+            waypoints = listOf(RouteWaypointDraft(name = "Start", latitude = 40.0, longitude = 29.0))
+        ).getOrThrow()
+        db.osmPoiDao().insertPois(
+            listOf(OsmPoiRecord(8801L, "Local Bakery", "shop", "bakery", 40.0, 29.0, 14, 1, 1))
+        )
+
+        val clearResult = StorageCalculationManager.clearProviderTiles(context, db, "openfreemap")
+        assertTrue(clearResult.isSuccess)
+        assertTrue(clearResult.recordsDeleted >= 1)
+
+        // User-authored Placemarks, Routes, and shared OSM POIs must remain untouched
+        assertNotNull(repo.getPlacemarkById(place.id))
+        assertNotNull(repo.getRouteById(route.route.id))
+        assertNotNull(db.osmPoiDao().getPoiById(8801L))
+
+        val report = StorageCalculationManager.calculateStorage(context, db)
+        assertEquals(1, report.featureStorage.userPlaceCount)
+        assertEquals(1, report.featureStorage.savedRouteCount)
+
+        db.savedRouteDao().clearAllRoutes()
+        db.userPlaceDao().clearAllPlaces()
+        db.osmPoiDao().clearAllPois()
+    }
+
+    @Test
+    fun test51_verifyControllerOverlaysStyleSwitchAndPoiIndependence(): Unit = runBlocking {
+        val controller = com.example.map.engine.MapEngineController(
+            context = context,
+            initialLat = 39.92,
+            initialLng = 32.85,
+            initialZoom = 12.0,
+            initialBearing = 0.0,
+            onCameraMoved = { _, _, _, _ -> }
+        )
+
+        val poi = OsmPoiRecord(7001L, "City Library", "amenity", "library", 39.921, 32.851, 14, 1, 1)
+        val place1 = UserPlaceEntity("place_1", "Camp Site", 39.930, 32.860, category = "camp")
+        val place2 = UserPlaceEntity("place_2", "Water Source", 39.935, 32.865, category = "water")
+        val route1 = com.example.data.places.SavedRouteModel(
+            route = SavedRouteEntity(
+                id = "route_1",
+                name = "Ridge Walk",
+                geometryJson = RouteGeometryCodec.encode(listOf(RoutePoint(39.93, 32.86), RoutePoint(39.94, 32.87))),
+                pointCount = 2,
+                totalDistanceMeters = 1400.0
+            ),
+            points = listOf(RoutePoint(39.93, 32.86), RoutePoint(39.94, 32.87)),
+            waypoints = emptyList()
+        )
+
+        controller.highlightPoi(poi, moveCamera = false)
+        controller.updateUserPlacemarks(listOf(place1, place2), place1.id)
+        controller.updateSavedRoutes(listOf(route1), route1.route.id)
+        controller.updateRouteDraftOverlay(listOf(RoutePoint(39.90, 32.80), RoutePoint(39.91, 32.81)))
+
+        assertEquals(2, controller.currentPlacemarks.size)
+        assertEquals("place_1", controller.selectedPlacemarkId)
+        assertEquals(1, controller.currentSavedRoutes.size)
+        assertEquals("route_1", controller.selectedRouteId)
+        assertEquals(2, controller.currentDraftRoutePoints.size)
+        assertEquals(7001L, controller.currentHighlightedPoi?.osmId)
+
+        // Deleting a placemark updates controller state without disturbing POI highlight
+        controller.updateUserPlacemarks(listOf(place2), null)
+        assertEquals(1, controller.currentPlacemarks.size)
+        assertNull(controller.selectedPlacemarkId)
+        assertEquals(7001L, controller.currentHighlightedPoi?.osmId)
+
+        // Focus on route sets midpoint camera target cleanly
+        controller.focusOnRoute(route1)
+        assertNotNull(controller.lastCameraFocusTarget)
+        assertEquals(39.935, controller.lastCameraFocusTarget!!.first, 1e-4)
+        assertEquals(32.865, controller.lastCameraFocusTarget!!.second, 1e-4)
+    }
+
+    @Test
+    fun test52_verifyMapViewModelPlacemarkPickAndRouteDraftUndoFlow(): Unit = runBlocking {
+        val db = AppDatabase.getInstance(context)
+        db.savedRouteDao().clearAllRoutes()
+        db.userPlaceDao().clearAllPlaces()
+
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        val viewModel = MapViewModel(app)
+        val controller = com.example.map.engine.MapEngineController(
+            context = context,
+            initialLat = 39.92,
+            initialLng = 32.85,
+            initialZoom = 12.0,
+            initialBearing = 0.0,
+            onCameraMoved = { _, _, _, _ -> }
+        )
+
+        // 1. Pick Placemark on map and save
+        viewModel.startPickPlacemarkOnMap()
+        assertTrue(viewModel.uiState.value.isPickingPlacemarkLocation)
+
+        viewModel.onMapCoordinatePickedForPlacemark(39.925, 32.837)
+        assertFalse(viewModel.uiState.value.isPickingPlacemarkLocation)
+        val editor = viewModel.uiState.value.placemarkEditorState
+        assertNotNull(editor)
+        assertEquals(39.925, editor!!.latitude, 1e-6)
+
+        viewModel.savePlacemarkFromEditor(
+            name = "Observation Deck",
+            description = "Wide valley view",
+            addressLabel = "",
+            category = "viewpoint",
+            tagsText = "sunset, view",
+            latitude = 39.925,
+            longitude = 32.837,
+            controller = controller
+        )
+
+        val deadline1 = System.currentTimeMillis() + 3000L
+        while (viewModel.uiState.value.placemarks.isEmpty() && System.currentTimeMillis() < deadline1) {
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            kotlinx.coroutines.delay(15L)
+        }
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+
+        assertEquals(1, viewModel.uiState.value.placemarks.size)
+        assertEquals("Observation Deck", viewModel.uiState.value.selectedPlacemark?.name)
+
+        // 2. Interactive route draft creation + waypoint + undo
+        viewModel.startNewRouteCreation(controller)
+        assertTrue(viewModel.uiState.value.routeDraft.isActive)
+
+        viewModel.addRouteDraftPoint(39.920, 32.830, controller)
+        viewModel.addRouteDraftPoint(39.925, 32.837, controller)
+        viewModel.addRouteDraftPoint(39.930, 32.845, controller)
+        viewModel.markLastDraftPointAsWaypoint("Turn Back")
+        assertEquals(3, viewModel.uiState.value.routeDraft.points.size)
+        assertEquals("Turn Back", viewModel.uiState.value.routeDraft.waypointNamesByPointIndex[2])
+
+        // Undo removes point #2 AND its associated waypoint name
+        viewModel.undoRouteDraftPoint(controller)
+        assertEquals(2, viewModel.uiState.value.routeDraft.points.size)
+        assertFalse(viewModel.uiState.value.routeDraft.waypointNamesByPointIndex.containsKey(2))
+
+        viewModel.markLastDraftPointAsWaypoint("Summit Turn")
+        viewModel.finishAndSaveRouteDraft(
+            name = "Valley Approach",
+            description = "Two-point trail",
+            controller = controller
+        )
+
+        val deadline2 = System.currentTimeMillis() + 3000L
+        while (viewModel.uiState.value.savedRoutes.isEmpty() && System.currentTimeMillis() < deadline2) {
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            kotlinx.coroutines.delay(15L)
+        }
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+
+        assertFalse(viewModel.uiState.value.routeDraft.isActive)
+        assertEquals(1, viewModel.uiState.value.savedRoutes.size)
+        assertEquals("Valley Approach", viewModel.uiState.value.selectedRoute?.route?.name)
+        assertEquals(1, viewModel.uiState.value.selectedRoute?.waypoints?.size)
+        assertEquals("Summit Turn", viewModel.uiState.value.selectedRoute?.waypoints?.first()?.name)
+
+        db.savedRouteDao().clearAllRoutes()
+        db.userPlaceDao().clearAllPlaces()
     }
 }

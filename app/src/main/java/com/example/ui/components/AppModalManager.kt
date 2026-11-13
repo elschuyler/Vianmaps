@@ -82,6 +82,8 @@ import androidx.compose.material.icons.filled.Layers
 import com.example.map.composition.MapComposition
 import androidx.compose.material.icons.filled.Terminal
 import com.example.data.db.OsmPoiRecord
+import com.example.data.db.UserPlaceEntity
+import com.example.data.places.SavedRouteModel
 import com.example.ui.screens.MapUiState
 
 @Composable
@@ -116,7 +118,19 @@ fun AppModalManager(
     onSelectPoiResult: (OsmPoiRecord) -> Unit,
     onTogglePoiHighlightVisibility: () -> Unit,
     onRecenterPoiHighlight: () -> Unit,
-    onClearPoiHighlight: () -> Unit
+    onClearPoiHighlight: () -> Unit,
+    onOpenPlacemarksWorkspace: () -> Unit,
+    onOpenRoutesWorkspace: () -> Unit,
+    onStartCreatePlacemarkAtCenter: () -> Unit,
+    onStartPickPlacemarkOnMap: () -> Unit,
+    onSelectPlacemarkOnMap: (UserPlaceEntity) -> Unit,
+    onOpenEditPlacemark: (UserPlaceEntity) -> Unit,
+    onDeletePlacemark: (String) -> Unit,
+    onStartCreateRouteOnMap: () -> Unit,
+    onSelectRouteOnMap: (SavedRouteModel) -> Unit,
+    onOpenEditRouteMetadata: (SavedRouteModel) -> Unit,
+    onEditRouteGeometryOnMap: (SavedRouteModel) -> Unit,
+    onDeleteSavedRoute: (String) -> Unit
 ) {
     if (settingsPopupOpen) {
         FloatingPopupDialog(onDismiss = onDismissSettingsPopup) {
@@ -186,11 +200,45 @@ fun AppModalManager(
         is ActiveModal.PlacesPopup -> {
             FloatingPopupDialog(onDismiss = onDismissModal) {
                 PlacesPopupContent(
+                    placemarkCount = uiState.placemarks.size,
+                    routeCount = uiState.savedRoutes.size,
+                    onOpenPlacemarks = {
+                        onDismissModal()
+                        onOpenPlacemarksWorkspace()
+                    },
+                    onOpenRoutes = {
+                        onDismissModal()
+                        onOpenRoutesWorkspace()
+                    },
                     onOpenMemoryPalace = {
                         onDismissModal()
                         onOpenMemoryPalace()
                     },
                     onClose = onDismissModal
+                )
+            }
+        }
+        is ActiveModal.PlacemarksWorkspace -> {
+            FullScreenModal(title = "Saved Placemarks", onClose = onDismissModal) {
+                PlacemarksWorkspaceContent(
+                    placemarks = uiState.placemarks,
+                    onCreateAtCenter = onStartCreatePlacemarkAtCenter,
+                    onPickOnMap = onStartPickPlacemarkOnMap,
+                    onSelectPlacemark = onSelectPlacemarkOnMap,
+                    onEditPlacemark = onOpenEditPlacemark,
+                    onDeletePlacemark = onDeletePlacemark
+                )
+            }
+        }
+        is ActiveModal.RoutesWorkspace -> {
+            FullScreenModal(title = "Saved Routes", onClose = onDismissModal) {
+                RoutesWorkspaceContent(
+                    routes = uiState.savedRoutes,
+                    onStartCreateRoute = onStartCreateRouteOnMap,
+                    onSelectRoute = onSelectRouteOnMap,
+                    onEditRouteMetadata = onOpenEditRouteMetadata,
+                    onEditRouteGeometry = onEditRouteGeometryOnMap,
+                    onDeleteRoute = onDeleteSavedRoute
                 )
             }
         }
@@ -627,6 +675,10 @@ fun MapsPopupContent(
 
 @Composable
 fun PlacesPopupContent(
+    placemarkCount: Int,
+    routeCount: Int,
+    onOpenPlacemarks: () -> Unit,
+    onOpenRoutes: () -> Unit,
     onOpenMemoryPalace: () -> Unit,
     onClose: () -> Unit
 ) {
@@ -643,9 +695,12 @@ fun PlacesPopupContent(
         }
         Spacer(modifier = Modifier.height(3.dp))
 
-        PlaceItemRow(title = "Placemarks", icon = Icons.Default.PinDrop, subtitle = "0 saved landmarks", onClick = onOpenMemoryPalace)
+        val placemarkLabel = if (placemarkCount == 1) "1 saved landmark" else "$placemarkCount saved landmarks"
+        val routeLabel = if (routeCount == 1) "1 saved route" else "$routeCount saved routes"
+
+        PlaceItemRow(title = "Placemarks", icon = Icons.Default.PinDrop, subtitle = placemarkLabel, onClick = onOpenPlacemarks)
         Spacer(modifier = Modifier.height(2.dp))
-        PlaceItemRow(title = "Routes", icon = Icons.Default.Route, subtitle = "0 recorded trails", onClick = onOpenMemoryPalace)
+        PlaceItemRow(title = "Routes", icon = Icons.Default.Route, subtitle = routeLabel, onClick = onOpenRoutes)
         Spacer(modifier = Modifier.height(2.dp))
         PlaceItemRow(title = "Notes", icon = Icons.Default.Description, subtitle = "Spatial map notes", onClick = onOpenMemoryPalace)
 

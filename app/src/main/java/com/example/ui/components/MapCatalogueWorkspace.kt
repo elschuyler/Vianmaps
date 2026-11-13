@@ -743,9 +743,11 @@ fun MapCatalogueWorkspace(
                 SettingsInfoRow(label = "Retained OSM Buildings", value = "${report.featureStorage.buildingCount} records")
                 SettingsInfoRow(label = "Retained OSM Roads", value = "${report.featureStorage.roadCount} records")
                 SettingsInfoRow(label = "Retained OSM Regions", value = "${report.featureStorage.regionCount} records")
+                SettingsInfoRow(label = "Saved Placemarks", value = "${report.featureStorage.userPlaceCount} records")
+                SettingsInfoRow(label = "Saved Routes", value = "${report.featureStorage.savedRouteCount} routes")
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "Feature records in SQLite are shared across all map styles and preserved when tile caches are cleared.",
+                    text = "OSM features and user-saved Places/Routes in SQLite are shared across all map styles and preserved when tile caches are cleared.",
                     fontSize = 10.sp,
                     color = TextDarkMuted
                 )

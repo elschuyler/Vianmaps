@@ -45,8 +45,15 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.map.engine.MapEngineController
 import com.example.ui.components.AppModalManager
 import com.example.ui.components.BottomNavigationBar
+import com.example.ui.components.PickLocationHudBanner
+import com.example.ui.components.PlacemarkEditorDialog
 import com.example.ui.components.RightSideMapControls
+import com.example.ui.components.RouteCreationHudBar
+import com.example.ui.components.RouteMetadataEditorDialog
+import com.example.ui.components.SaveRouteDialog
+import com.example.ui.components.SelectedPlacemarkBanner
 import com.example.ui.components.SelectedPoiHighlightBanner
+import com.example.ui.components.SelectedRouteBanner
 import com.example.ui.components.TopCoordinateInfoPanel
 import kotlinx.coroutines.launch
 import org.maplibre.android.MapLibre
@@ -64,12 +71,39 @@ fun MainMapScreen(
     val coroutineScope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
 
+    // Remember MapEngineController across recompositions
+    val controller = remember {
+        MapEngineController(
+            context = context,
+            initialLat = uiState.camera.latitude,
+            initialLng = uiState.camera.longitude,
+            initialZoom = uiState.camera.zoom,
+            initialBearing = uiState.camera.bearing,
+            onCameraMoved = { lat, lng, zoom, bearing ->
+                viewModel.onCameraMoved(lat, lng, zoom, bearing)
+            }
+        )
+    }
+
     // Handle back button for modals:
     // Back from Map Catalogue returns to More Settings
     // Back from Log Keeper, More Settings, Backup & Restore returns directly to Map
     // Back while compact popup is open dismisses the popup
-    BackHandler(enabled = uiState.activeModal != null || uiState.settingsPopupOpen) {
+    BackHandler(
+        enabled = uiState.placemarkEditorState != null ||
+            uiState.routeMetadataEditorTarget != null ||
+            uiState.routeDraft.showSaveDialog ||
+            uiState.routeDraft.isActive ||
+            uiState.isPickingPlacemarkLocation ||
+            uiState.activeModal != null ||
+            uiState.settingsPopupOpen
+    ) {
         when {
+            uiState.placemarkEditorState != null -> viewModel.dismissPlacemarkEditor()
+            uiState.routeMetadataEditorTarget != null -> viewModel.dismissRouteMetadataEditor()
+            uiState.routeDraft.showSaveDialog -> viewModel.dismissSaveRouteDialog()
+            uiState.routeDraft.isActive -> viewModel.cancelRouteDraft(controller)
+            uiState.isPickingPlacemarkLocation -> viewModel.cancelPickPlacemarkOnMap()
             uiState.settingsPopupOpen -> viewModel.closeSettingsPopup()
             uiState.activeModal is ActiveModal.MapCatalogue -> viewModel.openModal(ActiveModal.MoreSettings)
             else -> viewModel.closeModal()
@@ -86,20 +120,6 @@ fun MainMapScreen(
                 snackbarHostState.showSnackbar("Location permission denied. Map functions without location tracking.")
             }
         }
-    }
-
-    // Remember MapEngineController across recompositions
-    val controller = remember {
-        MapEngineController(
-            context = context,
-            initialLat = uiState.camera.latitude,
-            initialLng = uiState.camera.longitude,
-            initialZoom = uiState.camera.zoom,
-            initialBearing = uiState.camera.bearing,
-            onCameraMoved = { lat, lng, zoom, bearing ->
-                viewModel.onCameraMoved(lat, lng, zoom, bearing)
-            }
-        )
     }
 
     // Sync North Lock setting with controller
@@ -119,6 +139,68 @@ fun MainMapScreen(
     // Keep MapEngineController highlight state in sync with ViewModel across recompositions/rotation
     LaunchedEffect(uiState.highlightedPoi?.osmId, uiState.isPoiHighlightVisible) {
         controller.syncHighlightedPoiState(uiState.highlightedPoi, uiState.isPoiHighlightVisible)
+    }
+
+    // Keep MapEngineController user placemarks, saved routes, and active route draft synced
+    LaunchedEffect(uiState.placemarks, uiState.selectedPlacemark?.id) {
+        controller.updateUserPlacemarks(uiState.placemarks, uiState.selectedPlacemark?.id)
+    }
+
+    LaunchedEffect(uiState.savedRoutes, uiState.selectedRoute?.route?.id) {
+        controller.updateSavedRoutes(uiState.savedRoutes, uiState.selectedRoute?.route?.id)
+    }
+
+    LaunchedEffect(uiState.routeDraft.points, uiState.routeDraft.isActive) {
+        if (uiState.routeDraft.isActive) {
+            controller.updateRouteDraftOverlay(uiState.routeDraft.points)
+        } else {
+            controller.updateRouteDraftOverlay(emptyList())
+        }
+    }
+
+    // Wire interactive map tap, long-press, placemark tap, and route tap handlers without recreating MapView
+    LaunchedEffect(controller) {
+        controller.onMapTap = { lat, lng ->
+            val current = viewModel.uiState.value
+            when {
+                current.routeDraft.isActive && !current.routeDraft.showSaveDialog -> {
+                    viewModel.addRouteDraftPoint(lat, lng, controller)
+                    true
+                }
+                current.isPickingPlacemarkLocation -> {
+                    viewModel.onMapCoordinatePickedForPlacemark(lat, lng)
+                    true
+                }
+                else -> false
+            }
+        }
+        controller.onMapLongPress = { lat, lng ->
+            val current = viewModel.uiState.value
+            if (!current.routeDraft.isActive &&
+                !current.isPickingPlacemarkLocation &&
+                current.activeModal == null &&
+                !current.settingsPopupOpen &&
+                current.placemarkEditorState == null &&
+                current.routeMetadataEditorTarget == null
+            ) {
+                viewModel.onMapCoordinatePickedForPlacemark(lat, lng)
+            }
+        }
+        controller.onPlacemarkTapped = { placeId ->
+            viewModel.selectPlacemarkById(placeId, controller)
+        }
+        controller.onRouteTapped = { routeId ->
+            viewModel.selectSavedRouteById(routeId, controller)
+        }
+    }
+
+    // Surface one-shot feedback messages cleanly via Snackbar
+    val feedbackMessage = uiState.userFeedbackMessage
+    LaunchedEffect(feedbackMessage) {
+        if (!feedbackMessage.isNullOrBlank()) {
+            snackbarHostState.showSnackbar(feedbackMessage)
+            viewModel.consumeUserFeedbackMessage()
+        }
     }
 
     Scaffold(
@@ -279,13 +361,25 @@ fun MainMapScreen(
                         description = "Map-ready callback received (MapView#$mvId)",
                         stage = "MAP_READY"
                     )
+                    val snapshotState = viewModel.uiState.value
                     controller.syncHighlightedPoiState(
-                        poi = viewModel.uiState.value.highlightedPoi,
-                        visible = viewModel.uiState.value.isPoiHighlightVisible
+                        poi = snapshotState.highlightedPoi,
+                        visible = snapshotState.isPoiHighlightVisible
                     )
+                    controller.updateUserPlacemarks(
+                        placemarks = snapshotState.placemarks,
+                        selectedId = snapshotState.selectedPlacemark?.id
+                    )
+                    controller.updateSavedRoutes(
+                        routes = snapshotState.savedRoutes,
+                        selectedId = snapshotState.selectedRoute?.route?.id
+                    )
+                    if (snapshotState.routeDraft.isActive) {
+                        controller.updateRouteDraftOverlay(snapshotState.routeDraft.points)
+                    }
                     controller.attachMap(
                         map = maplibreMap,
-                        styleDef = viewModel.uiState.value.currentStyle,
+                        styleDef = snapshotState.currentStyle,
                         onStatusChanged = { status, desc, err ->
                             viewModel.onMapStatusChanged(status, desc, err)
                         }
@@ -535,20 +629,68 @@ fun MainMapScreen(
                     .padding(start = 8.dp, bottom = 8.dp)
             )
 
-            // Selected POI floating highlight banner above bottom bar when no modal is open
-            val highlightedPoi = uiState.highlightedPoi
-            if (highlightedPoi != null && uiState.activeModal == null && !uiState.settingsPopupOpen) {
-                SelectedPoiHighlightBanner(
-                    poi = highlightedPoi,
-                    isHighlightVisible = uiState.isPoiHighlightVisible,
-                    onRecenter = { viewModel.recenterOnHighlightedPoi(controller) },
-                    onToggleVisibility = { viewModel.togglePoiHighlightVisibility(controller) },
-                    onDismiss = { viewModel.clearHighlightedPoi(controller) },
-                    modifier = Modifier
-                        .align(Alignment.BottomStart)
-                        .navigationBarsPadding()
-                        .padding(start = 8.dp, end = 64.dp, bottom = 60.dp)
-                )
+            // Exclusive floating map HUD / inspection banner above bottom bar when no modal or popup is open
+            val hudModifier = Modifier
+                .align(Alignment.BottomStart)
+                .navigationBarsPadding()
+                .padding(start = 8.dp, end = 64.dp, bottom = 60.dp)
+            if (uiState.activeModal == null && !uiState.settingsPopupOpen) {
+                val activeSelectedPlacemark = uiState.selectedPlacemark
+                val activeSelectedRoute = uiState.selectedRoute
+                val highlightedPoi = uiState.highlightedPoi
+                when {
+                    uiState.routeDraft.isActive -> {
+                        RouteCreationHudBar(
+                            routeDraft = uiState.routeDraft,
+                            onAddMapCenterPoint = {
+                                val cam = viewModel.uiState.value.camera
+                                viewModel.addRouteDraftPoint(cam.latitude, cam.longitude, controller)
+                            },
+                            onUndoPoint = { viewModel.undoRouteDraftPoint(controller) },
+                            onMarkLastPointWaypoint = { wpName -> viewModel.markLastDraftPointAsWaypoint(wpName) },
+                            onFinish = { viewModel.openSaveRouteDialog() },
+                            onCancel = { viewModel.cancelRouteDraft(controller) },
+                            modifier = hudModifier
+                        )
+                    }
+                    uiState.isPickingPlacemarkLocation -> {
+                        PickLocationHudBanner(
+                            onUseMapCenter = { viewModel.startCreatePlacemarkAtMapCenter() },
+                            onCancel = { viewModel.cancelPickPlacemarkOnMap() },
+                            modifier = hudModifier
+                        )
+                    }
+                    activeSelectedPlacemark != null -> {
+                        SelectedPlacemarkBanner(
+                            place = activeSelectedPlacemark,
+                            onCenter = { viewModel.selectPlacemark(activeSelectedPlacemark, controller) },
+                            onEdit = { viewModel.openEditPlacemark(activeSelectedPlacemark) },
+                            onDelete = { viewModel.deletePlacemark(activeSelectedPlacemark.id, controller) },
+                            onDismiss = { viewModel.clearSelectedPlacemark(controller) },
+                            modifier = hudModifier
+                        )
+                    }
+                    activeSelectedRoute != null -> {
+                        SelectedRouteBanner(
+                            routeModel = activeSelectedRoute,
+                            onCenter = { viewModel.selectSavedRoute(activeSelectedRoute, controller) },
+                            onEdit = { viewModel.openRouteMetadataEditor(activeSelectedRoute) },
+                            onDelete = { viewModel.deleteSavedRoute(activeSelectedRoute.route.id, controller) },
+                            onDismiss = { viewModel.clearSelectedRoute(controller) },
+                            modifier = hudModifier
+                        )
+                    }
+                    highlightedPoi != null -> {
+                        SelectedPoiHighlightBanner(
+                            poi = highlightedPoi,
+                            isHighlightVisible = uiState.isPoiHighlightVisible,
+                            onRecenter = { viewModel.recenterOnHighlightedPoi(controller) },
+                            onToggleVisibility = { viewModel.togglePoiHighlightVisibility(controller) },
+                            onDismiss = { viewModel.clearHighlightedPoi(controller) },
+                            modifier = hudModifier
+                        )
+                    }
+                }
             }
 
             // Floating Popups & Modals (All unified in crisp White & Sky Blue)
@@ -621,8 +763,104 @@ fun MainMapScreen(
                 },
                 onClearPoiHighlight = {
                     viewModel.clearHighlightedPoi(controller)
+                },
+                onOpenPlacemarksWorkspace = {
+                    viewModel.openModal(ActiveModal.PlacemarksWorkspace)
+                },
+                onOpenRoutesWorkspace = {
+                    viewModel.openModal(ActiveModal.RoutesWorkspace)
+                },
+                onStartCreatePlacemarkAtCenter = {
+                    viewModel.startCreatePlacemarkAtMapCenter()
+                },
+                onStartPickPlacemarkOnMap = {
+                    viewModel.startPickPlacemarkOnMap()
+                },
+                onSelectPlacemarkOnMap = { place ->
+                    viewModel.selectPlacemark(place, controller)
+                },
+                onOpenEditPlacemark = { place ->
+                    viewModel.openEditPlacemark(place)
+                },
+                onDeletePlacemark = { placeId ->
+                    viewModel.deletePlacemark(placeId, controller)
+                },
+                onStartCreateRouteOnMap = {
+                    viewModel.startNewRouteCreation(controller)
+                },
+                onSelectRouteOnMap = { routeModel ->
+                    viewModel.selectSavedRoute(routeModel, controller)
+                },
+                onOpenEditRouteMetadata = { routeModel ->
+                    viewModel.openRouteMetadataEditor(routeModel)
+                },
+                onEditRouteGeometryOnMap = { routeModel ->
+                    viewModel.startEditingRouteGeometry(routeModel, controller)
+                },
+                onDeleteSavedRoute = { routeId ->
+                    viewModel.deleteSavedRoute(routeId, controller)
                 }
             )
+
+            // Phase 4.1 Editor Dialogs
+            val placemarkEditorState = uiState.placemarkEditorState
+            if (placemarkEditorState != null) {
+                PlacemarkEditorDialog(
+                    editorState = placemarkEditorState,
+                    onDismiss = { viewModel.dismissPlacemarkEditor() },
+                    onSave = { name, desc, addr, cat, tags, lat, lng, allowDup ->
+                        viewModel.savePlacemarkFromEditor(
+                            name = name,
+                            description = desc,
+                            addressLabel = addr,
+                            category = cat,
+                            tagsText = tags,
+                            latitude = lat,
+                            longitude = lng,
+                            allowDuplicateLocation = allowDup,
+                            controller = controller
+                        )
+                    },
+                    onOpenExistingDuplicate = { existing ->
+                        viewModel.selectExistingDuplicatePlacemark(existing, controller)
+                    }
+                )
+            }
+
+            if (uiState.routeDraft.isActive && uiState.routeDraft.showSaveDialog) {
+                SaveRouteDialog(
+                    routeDraft = uiState.routeDraft,
+                    onDismiss = { viewModel.dismissSaveRouteDialog() },
+                    onSave = { name, desc, wpMap ->
+                        viewModel.finishAndSaveRouteDraft(
+                            name = name,
+                            description = desc,
+                            waypointNamesByPointIndex = wpMap,
+                            controller = controller
+                        )
+                    }
+                )
+            }
+
+            val routeMetadataTarget = uiState.routeMetadataEditorTarget
+            if (routeMetadataTarget != null) {
+                RouteMetadataEditorDialog(
+                    routeModel = routeMetadataTarget,
+                    onDismiss = { viewModel.dismissRouteMetadataEditor() },
+                    onEditGeometryOnMap = {
+                        viewModel.startEditingRouteGeometry(routeMetadataTarget, controller)
+                    },
+                    onSaveChanges = { name, desc, updatedWps ->
+                        viewModel.updateRouteMetadataAndWaypoints(
+                            routeModel = routeMetadataTarget,
+                            name = name,
+                            description = desc,
+                            updatedWaypoints = updatedWps,
+                            controller = controller
+                        )
+                    }
+                )
+            }
         }
     }
 }

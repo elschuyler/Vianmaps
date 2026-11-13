@@ -1,7 +1,11 @@
 package com.example.map.engine
 
 import android.content.Context
+import android.graphics.RectF
 import com.example.data.db.OsmPoiRecord
+import com.example.data.db.UserPlaceEntity
+import com.example.data.places.RoutePoint
+import com.example.data.places.SavedRouteModel
 import com.example.diagnostics.DiagnosticRepository
 import com.example.diagnostics.LogSeverity
 import com.example.map.acquisition.VisibleTileCoordinator
@@ -10,9 +14,11 @@ import com.example.map.source.MapStyleDefinition
 import org.maplibre.android.camera.CameraPosition
 import org.maplibre.android.camera.CameraUpdateFactory
 import org.maplibre.android.geometry.LatLng
+import org.maplibre.android.geometry.LatLngBounds
 import org.maplibre.android.maps.MapLibreMap
 import org.maplibre.android.maps.Style
 import org.maplibre.android.style.layers.CircleLayer
+import org.maplibre.android.style.layers.LineLayer
 import org.maplibre.android.style.layers.Property
 import org.maplibre.android.style.layers.PropertyFactory
 import org.maplibre.android.style.layers.RasterLayer
@@ -21,6 +27,7 @@ import org.maplibre.android.style.sources.RasterSource
 import org.maplibre.android.style.sources.TileSet
 import org.maplibre.geojson.Feature
 import org.maplibre.geojson.FeatureCollection
+import org.maplibre.geojson.LineString
 import org.maplibre.geojson.Point
 
 /**
@@ -56,12 +63,51 @@ class MapEngineController(
     var lastCameraFocusTarget: Pair<Double, Double>? = null
         private set
 
+    var currentPlacemarks: List<UserPlaceEntity> = emptyList()
+        private set
+
+    var selectedPlacemarkId: String? = null
+        private set
+
+    var currentSavedRoutes: List<SavedRouteModel> = emptyList()
+        private set
+
+    var selectedRouteId: String? = null
+        private set
+
+    var currentDraftRoutePoints: List<RoutePoint> = emptyList()
+        private set
+
+    var currentDraftWaypointPoints: List<RoutePoint> = emptyList()
+        private set
+
+    var onMapTap: ((lat: Double, lng: Double) -> Boolean)? = null
+    var onMapLongPress: ((lat: Double, lng: Double) -> Unit)? = null
+    var onPlacemarkTapped: ((placeId: String) -> Unit)? = null
+    var onRouteTapped: ((routeId: String) -> Unit)? = null
+
     val visibleTileCoordinator = VisibleTileCoordinator(context)
 
     companion object {
         const val HIGHLIGHT_SOURCE_ID = "vian-selected-highlight-source"
         const val HIGHLIGHT_HALO_LAYER_ID = "vian-selected-highlight-halo"
         const val HIGHLIGHT_CORE_LAYER_ID = "vian-selected-highlight-core"
+
+        const val USER_PLACEMARKS_SOURCE_ID = "vian-user-placemarks-source"
+        const val USER_PLACEMARKS_LAYER_ID = "vian-user-placemarks-layer"
+        const val USER_SELECTED_PLACEMARK_SOURCE_ID = "vian-user-selected-placemark-source"
+        const val USER_SELECTED_PLACEMARK_HALO_ID = "vian-user-selected-placemark-halo"
+
+        const val USER_ROUTES_SOURCE_ID = "vian-user-routes-source"
+        const val USER_ROUTES_CASING_LAYER_ID = "vian-user-routes-casing"
+        const val USER_ROUTES_LINE_LAYER_ID = "vian-user-routes-line"
+        const val USER_WAYPOINTS_SOURCE_ID = "vian-user-waypoints-source"
+        const val USER_WAYPOINTS_LAYER_ID = "vian-user-waypoints-layer"
+
+        const val DRAFT_ROUTE_SOURCE_ID = "vian-user-route-draft-source"
+        const val DRAFT_ROUTE_LINE_LAYER_ID = "vian-user-route-draft-line"
+        const val DRAFT_ROUTE_POINTS_SOURCE_ID = "vian-user-route-draft-points-source"
+        const val DRAFT_ROUTE_POINTS_LAYER_ID = "vian-user-route-draft-points"
     }
 
     fun attachMap(
@@ -105,6 +151,46 @@ class MapEngineController(
                 visibleTileCoordinator.onCameraSettled(map, curStyle)
             }
         }
+
+        map.addOnMapClickListener { latLng ->
+            if (onMapTap?.invoke(latLng.latitude, latLng.longitude) == true) {
+                return@addOnMapClickListener true
+            }
+            try {
+                val screenPoint = map.projection.toScreenLocation(latLng)
+                val hitBox = RectF(
+                    screenPoint.x - 24f,
+                    screenPoint.y - 24f,
+                    screenPoint.x + 24f,
+                    screenPoint.y + 24f
+                )
+                val hitPlacemark = map.queryRenderedFeatures(hitBox, USER_PLACEMARKS_LAYER_ID)
+                    .firstOrNull { it.hasProperty("placeId") }
+                if (hitPlacemark != null) {
+                    val placeId = hitPlacemark.getStringProperty("placeId")
+                    if (!placeId.isNullOrBlank()) {
+                        onPlacemarkTapped?.invoke(placeId)
+                        return@addOnMapClickListener true
+                    }
+                }
+                val hitRoute = map.queryRenderedFeatures(hitBox, USER_ROUTES_LINE_LAYER_ID)
+                    .firstOrNull { it.hasProperty("routeId") }
+                if (hitRoute != null) {
+                    val routeId = hitRoute.getStringProperty("routeId")
+                    if (!routeId.isNullOrBlank()) {
+                        onRouteTapped?.invoke(routeId)
+                        return@addOnMapClickListener true
+                    }
+                }
+            } catch (_: Throwable) {
+            }
+            false
+        }
+
+        map.addOnMapLongClickListener { latLng ->
+            onMapLongPress?.invoke(latLng.latitude, latLng.longitude)
+            true
+        }
     }
 
     fun loadStyle(
@@ -126,7 +212,7 @@ class MapEngineController(
             currentComposition?.let { comp ->
                 applyCompositionOverlays(activeStyle, comp)
             }
-            applyPoiHighlightToStyle(activeStyle)
+            applyAllVianOverlaysToStyle(activeStyle)
             onStatusChanged?.invoke(
                 MapEngineStatus.STYLE_READY,
                 "Style loaded: ${styleDef.displayName} (${activeStyle.layers.size} layers)",
@@ -175,8 +261,8 @@ class MapEngineController(
             currentComposition?.let { comp ->
                 applyCompositionOverlays(style, comp)
             }
-            // Restore selected POI highlight marker without duplicating sources or layers
-            applyPoiHighlightToStyle(style)
+            // Restore all user-owned overlays (routes, placemarks, draft, selected POI) cleanly
+            applyAllVianOverlaysToStyle(style)
 
             onStatusChanged?.invoke(
                 MapEngineStatus.STYLE_READY,
@@ -211,7 +297,7 @@ class MapEngineController(
         val activeStyle = map.style
         if (activeStyle != null && currentStyleDefinition?.id == composition.baseStyleId) {
             applyCompositionOverlays(activeStyle, composition)
-            applyPoiHighlightToStyle(activeStyle)
+            applyAllVianOverlaysToStyle(activeStyle)
             DiagnosticRepository.log(
                 severity = LogSeverity.INFO,
                 source = "MapEngineController",
@@ -237,7 +323,7 @@ class MapEngineController(
 
             for (layer in style.layers) {
                 val id = layer.id.lowercase()
-                if (id.startsWith("vian-selected-highlight-")) continue
+                if (id.startsWith("vian-")) continue
                 when {
                     id.contains("poi") -> {
                         layer.setProperties(
@@ -503,6 +589,285 @@ class MapEngineController(
             description = "Cleared selected POI highlight from map",
             stage = "POI_HIGHLIGHT_CLEARED"
         )
+    }
+
+    private fun applyAllVianOverlaysToStyle(style: Style) {
+        applySavedRoutesToStyle(style)
+        applyUserPlacemarksToStyle(style)
+        applyRouteDraftToStyle(style)
+        applyPoiHighlightToStyle(style)
+    }
+
+    fun updateUserPlacemarks(placemarks: List<UserPlaceEntity>, selectedId: String?) {
+        currentPlacemarks = placemarks
+        selectedPlacemarkId = selectedId
+        maplibreMap?.style?.let { style ->
+            if (style.isFullyLoaded) {
+                applyUserPlacemarksToStyle(style)
+            }
+        }
+    }
+
+    fun updateSavedRoutes(routes: List<SavedRouteModel>, selectedId: String?) {
+        currentSavedRoutes = routes
+        selectedRouteId = selectedId
+        maplibreMap?.style?.let { style ->
+            if (style.isFullyLoaded) {
+                applySavedRoutesToStyle(style)
+            }
+        }
+    }
+
+    fun updateRouteDraftOverlay(points: List<RoutePoint>, waypointPoints: List<RoutePoint> = emptyList()) {
+        currentDraftRoutePoints = points
+        currentDraftWaypointPoints = waypointPoints
+        maplibreMap?.style?.let { style ->
+            if (style.isFullyLoaded) {
+                applyRouteDraftToStyle(style)
+            }
+        }
+    }
+
+    fun focusOnPlacemark(place: UserPlaceEntity, targetZoom: Double = 16.0) {
+        lastCameraFocusTarget = Pair(place.latitude, place.longitude)
+        maplibreMap?.let { map ->
+            val zoomToUse = maxOf(map.cameraPosition.zoom, targetZoom)
+            val update = CameraPosition.Builder()
+                .target(LatLng(place.latitude, place.longitude))
+                .zoom(zoomToUse)
+                .build()
+            map.animateCamera(CameraUpdateFactory.newCameraPosition(update))
+        }
+    }
+
+    fun focusOnRoute(route: SavedRouteModel) {
+        val validPoints = route.points.filter { it.isValid() }
+        if (validPoints.isEmpty()) return
+        if (validPoints.size == 1) {
+            val pt = validPoints.first()
+            centerOnLocation(pt.latitude, pt.longitude, 15.0)
+            return
+        }
+
+        val minLat = validPoints.minOf { it.latitude }
+        val maxLat = validPoints.maxOf { it.latitude }
+        val minLng = validPoints.minOf { it.longitude }
+        val maxLng = validPoints.maxOf { it.longitude }
+        val centerLat = (minLat + maxLat) / 2.0
+        val centerLng = (minLng + maxLng) / 2.0
+        lastCameraFocusTarget = Pair(centerLat, centerLng)
+
+        maplibreMap?.let { map ->
+            if ((maxLat - minLat) < 1e-5 && (maxLng - minLng) < 1e-5) {
+                val update = CameraPosition.Builder()
+                    .target(LatLng(centerLat, centerLng))
+                    .zoom(maxOf(map.cameraPosition.zoom, 15.5))
+                    .build()
+                map.animateCamera(CameraUpdateFactory.newCameraPosition(update))
+            } else {
+                try {
+                    val builder = LatLngBounds.Builder()
+                    validPoints.forEach { builder.include(LatLng(it.latitude, it.longitude)) }
+                    val bounds = builder.build()
+                    map.animateCamera(CameraUpdateFactory.newLatLngBounds(bounds, 120))
+                } catch (_: Throwable) {
+                    val update = CameraPosition.Builder()
+                        .target(LatLng(centerLat, centerLng))
+                        .zoom(14.0)
+                        .build()
+                    map.animateCamera(CameraUpdateFactory.newCameraPosition(update))
+                }
+            }
+        }
+    }
+
+    private fun applyUserPlacemarksToStyle(style: Style) {
+        try {
+            val allFeatures = currentPlacemarks
+                .filter { RoutePoint(it.latitude, it.longitude).isValid() }
+                .map { place ->
+                    Feature.fromGeometry(Point.fromLngLat(place.longitude, place.latitude)).apply {
+                        addStringProperty("placeId", place.id)
+                        addStringProperty("name", place.name)
+                    }
+                }
+            val collection = FeatureCollection.fromFeatures(allFeatures)
+            val existingSource = style.getSourceAs<GeoJsonSource>(USER_PLACEMARKS_SOURCE_ID)
+            if (existingSource != null) {
+                existingSource.setGeoJson(collection)
+            } else {
+                style.addSource(GeoJsonSource(USER_PLACEMARKS_SOURCE_ID, collection))
+            }
+
+            if (style.getLayer(USER_PLACEMARKS_LAYER_ID) == null) {
+                val layer = CircleLayer(USER_PLACEMARKS_LAYER_ID, USER_PLACEMARKS_SOURCE_ID).withProperties(
+                    PropertyFactory.circleRadius(8f),
+                    PropertyFactory.circleColor("#D97706"),
+                    PropertyFactory.circleStrokeWidth(2.5f),
+                    PropertyFactory.circleStrokeColor("#FFFFFF")
+                )
+                style.addLayer(layer)
+            }
+
+            val selectedPlace = currentPlacemarks.firstOrNull { it.id == selectedPlacemarkId }
+            val selectedFeatures = if (selectedPlace != null && RoutePoint(selectedPlace.latitude, selectedPlace.longitude).isValid()) {
+                listOf(Feature.fromGeometry(Point.fromLngLat(selectedPlace.longitude, selectedPlace.latitude)))
+            } else {
+                emptyList()
+            }
+            val selectedCollection = FeatureCollection.fromFeatures(selectedFeatures)
+            val selSource = style.getSourceAs<GeoJsonSource>(USER_SELECTED_PLACEMARK_SOURCE_ID)
+            if (selSource != null) {
+                selSource.setGeoJson(selectedCollection)
+            } else {
+                style.addSource(GeoJsonSource(USER_SELECTED_PLACEMARK_SOURCE_ID, selectedCollection))
+            }
+
+            if (style.getLayer(USER_SELECTED_PLACEMARK_HALO_ID) == null) {
+                val haloLayer = CircleLayer(USER_SELECTED_PLACEMARK_HALO_ID, USER_SELECTED_PLACEMARK_SOURCE_ID).withProperties(
+                    PropertyFactory.circleRadius(18f),
+                    PropertyFactory.circleColor("#40F59E0B"),
+                    PropertyFactory.circleStrokeWidth(2.5f),
+                    PropertyFactory.circleStrokeColor("#D97706")
+                )
+                style.addLayerBelow(haloLayer, USER_PLACEMARKS_LAYER_ID)
+            }
+        } catch (e: Throwable) {
+            DiagnosticRepository.log(
+                severity = LogSeverity.WARNING,
+                source = "MapEngineController",
+                description = "Failed applying user placemark overlay: ${e.message}"
+            )
+        }
+    }
+
+    private fun applySavedRoutesToStyle(style: Style) {
+        try {
+            val routeFeatures = currentSavedRoutes.mapNotNull { model ->
+                val validPts = model.points.filter { it.isValid() }
+                if (validPts.size < 2) return@mapNotNull null
+                val lngLats = validPts.map { Point.fromLngLat(it.longitude, it.latitude) }
+                Feature.fromGeometry(LineString.fromLngLats(lngLats)).apply {
+                    addStringProperty("routeId", model.route.id)
+                    addBooleanProperty("selected", model.route.id == selectedRouteId)
+                }
+            }
+            val routeCollection = FeatureCollection.fromFeatures(routeFeatures)
+            val routeSource = style.getSourceAs<GeoJsonSource>(USER_ROUTES_SOURCE_ID)
+            if (routeSource != null) {
+                routeSource.setGeoJson(routeCollection)
+            } else {
+                style.addSource(GeoJsonSource(USER_ROUTES_SOURCE_ID, routeCollection))
+            }
+
+            if (style.getLayer(USER_ROUTES_CASING_LAYER_ID) == null) {
+                val casing = LineLayer(USER_ROUTES_CASING_LAYER_ID, USER_ROUTES_SOURCE_ID).withProperties(
+                    PropertyFactory.lineColor("#FFFFFF"),
+                    PropertyFactory.lineWidth(6.5f),
+                    PropertyFactory.lineCap(Property.LINE_CAP_ROUND),
+                    PropertyFactory.lineJoin(Property.LINE_JOIN_ROUND),
+                    PropertyFactory.lineOpacity(0.9f)
+                )
+                style.addLayer(casing)
+            }
+            if (style.getLayer(USER_ROUTES_LINE_LAYER_ID) == null) {
+                val line = LineLayer(USER_ROUTES_LINE_LAYER_ID, USER_ROUTES_SOURCE_ID).withProperties(
+                    PropertyFactory.lineColor("#059669"),
+                    PropertyFactory.lineWidth(4.0f),
+                    PropertyFactory.lineCap(Property.LINE_CAP_ROUND),
+                    PropertyFactory.lineJoin(Property.LINE_JOIN_ROUND)
+                )
+                style.addLayerAbove(line, USER_ROUTES_CASING_LAYER_ID)
+            }
+
+            val waypointFeatures = currentSavedRoutes.flatMap { model ->
+                model.waypoints
+                    .filter { RoutePoint(it.latitude, it.longitude).isValid() }
+                    .map { wp ->
+                        Feature.fromGeometry(Point.fromLngLat(wp.longitude, wp.latitude)).apply {
+                            addStringProperty("routeId", model.route.id)
+                            addStringProperty("waypointId", wp.id)
+                        }
+                    }
+            }
+            val wpCollection = FeatureCollection.fromFeatures(waypointFeatures)
+            val wpSource = style.getSourceAs<GeoJsonSource>(USER_WAYPOINTS_SOURCE_ID)
+            if (wpSource != null) {
+                wpSource.setGeoJson(wpCollection)
+            } else {
+                style.addSource(GeoJsonSource(USER_WAYPOINTS_SOURCE_ID, wpCollection))
+            }
+
+            if (style.getLayer(USER_WAYPOINTS_LAYER_ID) == null) {
+                val wpLayer = CircleLayer(USER_WAYPOINTS_LAYER_ID, USER_WAYPOINTS_SOURCE_ID).withProperties(
+                    PropertyFactory.circleRadius(6.0f),
+                    PropertyFactory.circleColor("#047857"),
+                    PropertyFactory.circleStrokeWidth(2.0f),
+                    PropertyFactory.circleStrokeColor("#FFFFFF")
+                )
+                style.addLayerAbove(wpLayer, USER_ROUTES_LINE_LAYER_ID)
+            }
+        } catch (e: Throwable) {
+            DiagnosticRepository.log(
+                severity = LogSeverity.WARNING,
+                source = "MapEngineController",
+                description = "Failed applying saved routes overlay: ${e.message}"
+            )
+        }
+    }
+
+    private fun applyRouteDraftToStyle(style: Style) {
+        try {
+            val validPts = currentDraftRoutePoints.filter { it.isValid() }
+            val lineFeatures = if (validPts.size >= 2) {
+                listOf(Feature.fromGeometry(LineString.fromLngLats(validPts.map { Point.fromLngLat(it.longitude, it.latitude) })))
+            } else {
+                emptyList()
+            }
+            val lineCollection = FeatureCollection.fromFeatures(lineFeatures)
+            val lineSource = style.getSourceAs<GeoJsonSource>(DRAFT_ROUTE_SOURCE_ID)
+            if (lineSource != null) {
+                lineSource.setGeoJson(lineCollection)
+            } else {
+                style.addSource(GeoJsonSource(DRAFT_ROUTE_SOURCE_ID, lineCollection))
+            }
+            if (style.getLayer(DRAFT_ROUTE_LINE_LAYER_ID) == null) {
+                val draftLine = LineLayer(DRAFT_ROUTE_LINE_LAYER_ID, DRAFT_ROUTE_SOURCE_ID).withProperties(
+                    PropertyFactory.lineColor("#E11D48"),
+                    PropertyFactory.lineWidth(4.5f),
+                    PropertyFactory.lineDasharray(arrayOf(2.0f, 1.5f)),
+                    PropertyFactory.lineCap(Property.LINE_CAP_ROUND),
+                    PropertyFactory.lineJoin(Property.LINE_JOIN_ROUND)
+                )
+                style.addLayer(draftLine)
+            }
+
+            val pointFeatures = validPts.map { pt ->
+                Feature.fromGeometry(Point.fromLngLat(pt.longitude, pt.latitude))
+            }
+            val ptCollection = FeatureCollection.fromFeatures(pointFeatures)
+            val ptSource = style.getSourceAs<GeoJsonSource>(DRAFT_ROUTE_POINTS_SOURCE_ID)
+            if (ptSource != null) {
+                ptSource.setGeoJson(ptCollection)
+            } else {
+                style.addSource(GeoJsonSource(DRAFT_ROUTE_POINTS_SOURCE_ID, ptCollection))
+            }
+            if (style.getLayer(DRAFT_ROUTE_POINTS_LAYER_ID) == null) {
+                val draftPoints = CircleLayer(DRAFT_ROUTE_POINTS_LAYER_ID, DRAFT_ROUTE_POINTS_SOURCE_ID).withProperties(
+                    PropertyFactory.circleRadius(6.5f),
+                    PropertyFactory.circleColor("#E11D48"),
+                    PropertyFactory.circleStrokeWidth(2.5f),
+                    PropertyFactory.circleStrokeColor("#FFFFFF")
+                )
+                style.addLayerAbove(draftPoints, DRAFT_ROUTE_LINE_LAYER_ID)
+            }
+        } catch (e: Throwable) {
+            DiagnosticRepository.log(
+                severity = LogSeverity.WARNING,
+                source = "MapEngineController",
+                description = "Failed applying draft route overlay: ${e.message}"
+            )
+        }
     }
 
     private fun applyPoiHighlightToStyle(style: Style) {

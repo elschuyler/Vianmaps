@@ -256,3 +256,34 @@ This file series is the project's permanent audit trail across sessions. Each fi
 * **Deviations from request**: None.
 * **Known issues / follow-up**: Physical-device verification of live tile POI ingestion, MapLibre GL circle highlight rendering across styles, and airplane-mode search needs manual verification using the provided acceptance guide. General polygon/area highlight drawing remains planned for a future milestone.
 
+---
+
+### Entry 2026-11-13T21:42:00Z — Phase 4.1: Shared Places, Placemarks and Saved Routes Foundation
+* **Summary**: Implement persistent Room v2 shared Places (`user_places`), `saved_routes`, and `route_waypoints` with safe v1->v2 migration, offline Placemark/Route CRUD and ~10m duplicate policy, interactive map route/point creation, independent MapLibre overlays, and Places/Storage UI integration.
+* **Exact files touched**:
+  - `app/src/main/java/com/example/data/db/AppDatabaseContract.kt` (bumped `CURRENT_VERSION` to 2; documented `user_places`, `saved_routes`, `route_waypoints`)
+  - `app/src/main/java/com/example/data/db/AppDatabase.kt` (added `UserPlaceEntity`, `UserPlaceDao`, `SavedRouteEntity`, `RouteWaypointEntity`, `SavedRouteWithWaypoints`, `SavedRouteDao`, `MIGRATION_1_2`, and registered `.addMigrations(MIGRATION_1_2)`)
+  - `app/src/main/java/com/example/data/places/PlacesAndRoutesRepository.kt` (created repository, `RoutePoint`, `RouteWaypointDraft`, `DecodedRouteGeometry`, `SavedRouteModel`, `CreatePlaceOutcome`, and `RouteGeometryCodec` with malformed-JSON tolerance and Haversine length calculation)
+  - `app/src/main/java/com/example/data/storage/StorageCalculationManager.kt` (added `userPlaceCount` & `savedRouteCount` to `FeatureStorageReport`; confirmed tile clearing leaves user Places/Routes untouched)
+  - `app/src/main/java/com/example/map/engine/MapEngineController.kt` (added GeoJSON sources/layers for user placemarks, selected placemark halo, saved routes, route waypoints, and route draft overlays; added tap/long-press hit detection via `queryRenderedFeatures`; preserved overlays across style/composition changes and guarded `vian-` layers)
+  - `app/src/main/java/com/example/ui/screens/MapViewModel.kt` (added `PlacemarkEditorState`, `RouteDraftUiState`, `ActiveModal.PlacemarksWorkspace`, `ActiveModal.RoutesWorkspace`, reactive Flow collection, Pick-on-Map, long-press creation, draft point/waypoint/undo/save/cancel, and selection actions)
+  - `app/src/main/java/com/example/ui/components/PlacesWorkspacesModal.kt` (created `PlacemarksWorkspaceContent`, `RoutesWorkspaceContent`, `PlacemarkEditorDialog` with ~10m duplicate policy, `SaveRouteDialog`, and `RouteMetadataEditorDialog`)
+  - `app/src/main/java/com/example/ui/components/PlacesMapOverlays.kt` (created `PickLocationHudBanner`, `RouteCreationHudBar`, `SelectedPlacemarkBanner`, and `SelectedRouteBanner`)
+  - `app/src/main/java/com/example/ui/components/AppModalManager.kt` (wired `PlacemarksWorkspace` and `RoutesWorkspace` with dynamic counts from `PlacesPopupContent` while keeping `MemoryPalaceContent` / Notes intact)
+  - `app/src/main/java/com/example/ui/components/MapCatalogueWorkspace.kt` (added `Saved Placemarks` and `Saved Routes` rows to Section 4 Feature Store Accounting)
+  - `app/src/main/java/com/example/ui/screens/MainMapScreen.kt` (ordered `controller` declaration cleanly above `BackHandler`, wired overlay/tap `LaunchedEffect`s and bottom-left HUD banners, preserved `MapView` instantiation and `DisposableEffect(lifecycleOwner)` untouched)
+  - `app/src/test/java/com/example/ExampleUnitTest.kt` (added tests 46–52 covering Placemark CRUD & ~10m duplicate policy, Route & ordered Waypoint persistence with FK cascades, malformed geometry resilience, real SQLite v1->v2 migration preserving v1 data, tile-clear preservation of Places/Routes, controller overlay/POI independence, and ViewModel pick/draft/undo flow)
+  - `BLUEPRINT.md` (marked Phase 4.1 complete and added ledger entry)
+  - `receipts/RECEIPTS_002.md` (appended Phase 4.1 audit entry)
+* **What was actually done**:
+  - Upgraded `map_app_master.db` from schema version 1 to version 2 via explicit `MIGRATION_1_2` without destructive fallback, creating `user_places`, `saved_routes`, and `route_waypoints` (cascade delete on `routeId`, `SET NULL` on optional `placeId`) while preserving all existing v1 rows.
+  - Built `PlacesAndRoutesRepository` for local-first offline persistence without requiring GPS/location permissions or network calls, computing polyline distance via Haversine (`RouteGeometryCodec`) and enforcing a ~10m nearby-placemark prompt in `PlacemarkEditorDialog` ("Open Existing" vs "Save Separate").
+  - Rendered user placemarks (Amber), selected placemark halo, saved routes (Emerald polyline + waypoints), and active route drafts (Rose dashed polyline) on MapLibre GL cleanly separated from Sky Blue POI highlight overlays, restored across style and composition switches.
+  - Implemented offline route creation workflows in `RoutesWorkspaceContent` + `RouteCreationHudBar` (`+ Center`, map tap point placement, `Waypoint` promotion, `Undo`, `Finish`, `Cancel` with discard prompt), explicitly noting saved routes store user-placed path geometry and waypoints without Valhalla turn-by-turn routing calculation.
+* **How it was verified**:
+  - Local JVM Robolectric unit test suite (`gradle :app:testDebugUnitTest`): `TEST-com.example.ExampleUnitTest.xml` reported 52/52 tests passed (`tests="52"`, `skipped="0"`, `failures="0"`, `errors="0"`, BUILD SUCCESSFUL in 30s).
+  - Container applet compilation (`compile_applet`): Build succeeded on final code state (verified again after docs edit).
+  - On-device verification: Not tested on physical Android hardware or streaming emulator in this container (no emulator/ADB available; on-device verification guide provided).
+* **Deviations from request**: None.
+* **Known issues / follow-up**: Physical-device verification of MapLibre GL rendering, tap/long-press hit detection, and saved-route creation across style switches requires manual testing on device. Valhalla offline turn-by-turn routing calculation remains planned for a future milestone.
+

@@ -84,7 +84,9 @@ data class FeatureStorageReport(
     val roadCount: Int,
     val regionCount: Int,
     val databaseSizeBytes: Long,
-    val formattedDatabaseSize: String
+    val formattedDatabaseSize: String,
+    val userPlaceCount: Int = 0,
+    val savedRouteCount: Int = 0
 )
 
 /**
@@ -584,6 +586,8 @@ object StorageCalculationManager {
         val buildingCount = database.osmBuildingDao().getBuildingCount()
         val roadCount = database.osmRoadDao().getRoadCount()
         val regionCount = database.osmRegionDao().getRegionCount()
+        val userPlaceCount = database.userPlaceDao().getPlacemarkCount()
+        val savedRouteCount = database.savedRouteDao().getRouteCount()
 
         val featureReport = FeatureStorageReport(
             poiCount = poiCount,
@@ -591,7 +595,9 @@ object StorageCalculationManager {
             roadCount = roadCount,
             regionCount = regionCount,
             databaseSizeBytes = dbBytes,
-            formattedDatabaseSize = formatBytes(dbBytes)
+            formattedDatabaseSize = formatBytes(dbBytes),
+            userPlaceCount = userPlaceCount,
+            savedRouteCount = savedRouteCount
         )
 
         // 3. Routing graph inspection
