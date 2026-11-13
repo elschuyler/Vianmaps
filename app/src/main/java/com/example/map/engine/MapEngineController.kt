@@ -1,6 +1,7 @@
 package com.example.map.engine
 
 import android.content.Context
+import android.graphics.PointF
 import android.graphics.RectF
 import com.example.data.db.OsmPoiRecord
 import com.example.data.db.UserPlaceEntity
@@ -81,10 +82,17 @@ class MapEngineController(
     var currentDraftWaypointPoints: List<RoutePoint> = emptyList()
         private set
 
+    var currentAreaPin: RoutePoint? = null
+        private set
+
+    private var lastLongPressElapsedMs: Long = 0L
+
     var onMapTap: ((lat: Double, lng: Double) -> Boolean)? = null
+    var onEmptyMapSingleTap: ((lat: Double, lng: Double) -> Unit)? = null
     var onMapLongPress: ((lat: Double, lng: Double) -> Unit)? = null
     var onPlacemarkTapped: ((placeId: String) -> Unit)? = null
     var onRouteTapped: ((routeId: String) -> Unit)? = null
+    var onHighlightedPoiTapped: (() -> Unit)? = null
 
     val visibleTileCoordinator = VisibleTileCoordinator(context)
 
@@ -108,6 +116,10 @@ class MapEngineController(
         const val DRAFT_ROUTE_LINE_LAYER_ID = "vian-user-route-draft-line"
         const val DRAFT_ROUTE_POINTS_SOURCE_ID = "vian-user-route-draft-points-source"
         const val DRAFT_ROUTE_POINTS_LAYER_ID = "vian-user-route-draft-points"
+
+        const val AREA_PIN_SOURCE_ID = "vian-area-pin-source"
+        const val AREA_PIN_HALO_LAYER_ID = "vian-area-pin-halo"
+        const val AREA_PIN_CORE_LAYER_ID = "vian-area-pin-core"
     }
 
     fun attachMap(
@@ -153,9 +165,9 @@ class MapEngineController(
         }
 
         map.addOnMapClickListener { latLng ->
-            if (onMapTap?.invoke(latLng.latitude, latLng.longitude) == true) {
-                return@addOnMapClickListener true
-            }
+            var hitPlaceId: String? = null
+            var hitRouteId: String? = null
+            var hitPoi = false
             try {
                 val screenPoint = map.projection.toScreenLocation(latLng)
                 val hitBox = RectF(
@@ -164,32 +176,83 @@ class MapEngineController(
                     screenPoint.x + 24f,
                     screenPoint.y + 24f
                 )
-                val hitPlacemark = map.queryRenderedFeatures(hitBox, USER_PLACEMARKS_LAYER_ID)
+                hitPlaceId = map.queryRenderedFeatures(hitBox, USER_PLACEMARKS_LAYER_ID)
                     .firstOrNull { it.hasProperty("placeId") }
-                if (hitPlacemark != null) {
-                    val placeId = hitPlacemark.getStringProperty("placeId")
-                    if (!placeId.isNullOrBlank()) {
-                        onPlacemarkTapped?.invoke(placeId)
-                        return@addOnMapClickListener true
-                    }
+                    ?.getStringProperty("placeId")
+                    ?.takeIf { it.isNotBlank() }
+
+                if (hitPlaceId == null) {
+                    hitRouteId = map.queryRenderedFeatures(hitBox, USER_ROUTES_LINE_LAYER_ID)
+                        .firstOrNull { it.hasProperty("routeId") }
+                        ?.getStringProperty("routeId")
+                        ?.takeIf { it.isNotBlank() }
                 }
-                val hitRoute = map.queryRenderedFeatures(hitBox, USER_ROUTES_LINE_LAYER_ID)
-                    .firstOrNull { it.hasProperty("routeId") }
-                if (hitRoute != null) {
-                    val routeId = hitRoute.getStringProperty("routeId")
-                    if (!routeId.isNullOrBlank()) {
-                        onRouteTapped?.invoke(routeId)
-                        return@addOnMapClickListener true
-                    }
+
+                if (hitPlaceId == null && hitRouteId == null && currentHighlightedPoi != null && isHighlightVisible) {
+                    hitPoi = map.queryRenderedFeatures(hitBox, HIGHLIGHT_CORE_LAYER_ID).isNotEmpty()
                 }
             } catch (_: Throwable) {
             }
-            false
+            dispatchMapTap(
+                lat = latLng.latitude,
+                lng = latLng.longitude,
+                hitPlacemarkId = hitPlaceId,
+                hitRouteId = hitRouteId,
+                hitHighlightedPoi = hitPoi
+            )
         }
 
         map.addOnMapLongClickListener { latLng ->
-            onMapLongPress?.invoke(latLng.latitude, latLng.longitude)
+            dispatchMapLongPress(latLng.latitude, latLng.longitude)
             true
+        }
+    }
+
+    fun dispatchMapTap(
+        lat: Double,
+        lng: Double,
+        hitPlacemarkId: String? = null,
+        hitRouteId: String? = null,
+        hitHighlightedPoi: Boolean = false,
+        nowMs: Long = android.os.SystemClock.elapsedRealtime()
+    ): Boolean {
+        if ((nowMs - lastLongPressElapsedMs) in 0L..350L) {
+            return true
+        }
+        if (onMapTap?.invoke(lat, lng) == true) {
+            return true
+        }
+        if (!hitPlacemarkId.isNullOrBlank()) {
+            onPlacemarkTapped?.invoke(hitPlacemarkId)
+            return true
+        }
+        if (!hitRouteId.isNullOrBlank()) {
+            onRouteTapped?.invoke(hitRouteId)
+            return true
+        }
+        if (hitHighlightedPoi) {
+            onHighlightedPoiTapped?.invoke()
+            return true
+        }
+        onEmptyMapSingleTap?.invoke(lat, lng)
+        return true
+    }
+
+    fun dispatchMapLongPress(
+        lat: Double,
+        lng: Double,
+        nowMs: Long = android.os.SystemClock.elapsedRealtime()
+    ) {
+        lastLongPressElapsedMs = nowMs
+        onMapLongPress?.invoke(lat, lng)
+    }
+
+    fun projectToScreen(lat: Double, lng: Double): android.graphics.PointF? {
+        val map = maplibreMap ?: return null
+        return try {
+            map.projection.toScreenLocation(LatLng(lat, lng))
+        } catch (_: Throwable) {
+            null
         }
     }
 
@@ -595,7 +658,27 @@ class MapEngineController(
         applySavedRoutesToStyle(style)
         applyUserPlacemarksToStyle(style)
         applyRouteDraftToStyle(style)
+        applyAreaPinToStyle(style)
         applyPoiHighlightToStyle(style)
+    }
+
+    fun setAreaSelectionPin(lat: Double, lng: Double) {
+        val pt = RoutePoint(lat, lng)
+        currentAreaPin = if (pt.isValid()) pt else null
+        maplibreMap?.style?.let { style ->
+            if (style.isFullyLoaded) {
+                applyAreaPinToStyle(style)
+            }
+        }
+    }
+
+    fun clearAreaSelectionPin() {
+        currentAreaPin = null
+        maplibreMap?.style?.let { style ->
+            if (style.isFullyLoaded) {
+                applyAreaPinToStyle(style)
+            }
+        }
     }
 
     fun updateUserPlacemarks(placemarks: List<UserPlaceEntity>, selectedId: String?) {
@@ -922,6 +1005,43 @@ class MapEngineController(
                 source = "MapEngineController",
                 description = "Failed applying POI highlight layer: ${e.message}"
             )
+        }
+    }
+
+    private fun applyAreaPinToStyle(style: Style) {
+        try {
+            val pin = currentAreaPin
+            val features = if (pin != null && pin.isValid()) {
+                listOf(Feature.fromGeometry(Point.fromLngLat(pin.longitude, pin.latitude)))
+            } else {
+                emptyList()
+            }
+            val collection = FeatureCollection.fromFeatures(features)
+            val source = style.getSourceAs<GeoJsonSource>(AREA_PIN_SOURCE_ID)
+            if (source != null) {
+                source.setGeoJson(collection)
+            } else {
+                style.addSource(GeoJsonSource(AREA_PIN_SOURCE_ID, collection))
+            }
+            if (style.getLayer(AREA_PIN_HALO_LAYER_ID) == null) {
+                val halo = CircleLayer(AREA_PIN_HALO_LAYER_ID, AREA_PIN_SOURCE_ID).withProperties(
+                    PropertyFactory.circleRadius(18f),
+                    PropertyFactory.circleColor("#336366F1"),
+                    PropertyFactory.circleStrokeWidth(2f),
+                    PropertyFactory.circleStrokeColor("#4F46E5")
+                )
+                style.addLayer(halo)
+            }
+            if (style.getLayer(AREA_PIN_CORE_LAYER_ID) == null) {
+                val core = CircleLayer(AREA_PIN_CORE_LAYER_ID, AREA_PIN_SOURCE_ID).withProperties(
+                    PropertyFactory.circleRadius(7.5f),
+                    PropertyFactory.circleColor("#4F46E5"),
+                    PropertyFactory.circleStrokeWidth(2.5f),
+                    PropertyFactory.circleStrokeColor("#FFFFFF")
+                )
+                style.addLayerAbove(core, AREA_PIN_HALO_LAYER_ID)
+            }
+        } catch (_: Throwable) {
         }
     }
 

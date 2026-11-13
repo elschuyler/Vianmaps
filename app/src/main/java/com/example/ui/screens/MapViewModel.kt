@@ -20,8 +20,13 @@ import kotlinx.coroutines.launch
 import com.example.map.engine.MapEngineController
 import com.example.map.engine.MapEngineStatus
 
+import com.example.data.area.AreaDataProvenance
+import com.example.data.area.AreaDetailsRepository
+import com.example.data.area.AreaDetailsResult
+import com.example.data.area.AreaRemoteLookupGateway
 import com.example.data.db.AppDatabase
 import com.example.data.db.OsmPoiRecord
+import com.example.data.db.SavedAreaEntity
 import com.example.data.db.UserPlaceEntity
 import com.example.data.osm.OsmOfflineDataRepository
 import com.example.data.places.CreatePlaceOutcome
@@ -109,6 +114,11 @@ data class MapUiState(
     val placemarkEditorState: PlacemarkEditorState? = null,
     val routeDraft: RouteDraftUiState = RouteDraftUiState(),
     val routeMetadataEditorTarget: SavedRouteModel? = null,
+    val savedAreas: List<SavedAreaEntity> = emptyList(),
+    val areaDetailsState: AreaDetailsUiState? = null,
+    val mapContextMenuState: MapContextMenuUiState? = null,
+    val savedAreaEditorState: SavedAreaEditorState? = null,
+    val plannedActionNotice: PlannedActionNoticeState? = null,
     val userFeedbackMessage: String? = null
 )
 
@@ -121,6 +131,7 @@ sealed interface ActiveModal {
     data object PlacesPopup : ActiveModal
     data object PlacemarksWorkspace : ActiveModal
     data object RoutesWorkspace : ActiveModal
+    data object SavedAreasWorkspace : ActiveModal
     data object MemoryPalaceWorkspace : ActiveModal
     data object ToolsPopup : ActiveModal
     data object PoiSearch : ActiveModal
@@ -133,9 +144,28 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
     private val preferencesRepository = AppPreferencesRepository(application)
     private val osmRepository = OsmOfflineDataRepository(application)
     private val placesRepository = PlacesAndRoutesRepository(application)
+    private var areaRepository = AreaDetailsRepository(application)
     val networkMonitor = NetworkDiagnosticsMonitor(application)
 
     private var searchJob: Job? = null
+    private var areaLookupJob: Job? = null
+    private var contextLookupJob: Job? = null
+    private var onlineOverrideForTesting: Boolean? = null
+
+    internal fun configureAreaTesting(
+        gateway: AreaRemoteLookupGateway? = null,
+        onlineOverride: Boolean? = null
+    ) {
+        if (gateway != null) {
+            areaRepository = AreaDetailsRepository(getApplication(), gateway)
+        }
+        onlineOverrideForTesting = onlineOverride
+    }
+
+    private fun isNetworkLookupPermitted(): Boolean {
+        val deviceOnline = onlineOverrideForTesting ?: networkMonitor.isDeviceOnline.value
+        return AppNetworkPolicy.isNetworkAllowed() && deviceOnline
+    }
 
     private val _uiState = MutableStateFlow(MapUiState())
     val uiState: StateFlow<MapUiState> = _uiState.asStateFlow()
@@ -166,6 +196,12 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
                     savedRoutes = routes,
                     selectedRoute = refreshedSelected
                 )
+            }
+        }
+
+        viewModelScope.launch {
+            AppDatabase.getInstance(getApplication()).savedAreaDao().observeSavedAreas().collect { areas ->
+                _uiState.value = _uiState.value.copy(savedAreas = areas)
             }
         }
 
@@ -1175,9 +1211,674 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // =========================================================================
+    // Phase 4.2: Area Details Popup, Saved Areas & Long-Press Context Actions
+    // =========================================================================
+
+    fun updateAnchoredScreenCoordinates(controller: MapEngineController) {
+        val currentArea = _uiState.value.areaDetailsState
+        val currentCtx = _uiState.value.mapContextMenuState
+        if (currentArea == null && currentCtx == null) return
+
+        val nextArea = currentArea?.let { area ->
+            val projected = controller.projectToScreen(area.latitude, area.longitude)
+            if (projected != null) {
+                area.copy(screenX = projected.x, screenY = projected.y)
+            } else {
+                area
+            }
+        }
+        val nextCtx = currentCtx?.let { ctx ->
+            val projected = controller.projectToScreen(ctx.latitude, ctx.longitude)
+            if (projected != null) {
+                ctx.copy(screenX = projected.x, screenY = projected.y)
+            } else {
+                ctx
+            }
+        }
+        _uiState.value = _uiState.value.copy(
+            areaDetailsState = nextArea,
+            mapContextMenuState = nextCtx
+        )
+    }
+
+    fun onEmptyMapSingleTap(
+        latitude: Double,
+        longitude: Double,
+        controller: MapEngineController? = null
+    ) {
+        if (!RoutePoint(latitude, longitude).isValid()) return
+        val current = _uiState.value
+
+        // If a context menu is open, a tap on the map cleanly dismisses it without accidentally jumping to another popup
+        if (current.mapContextMenuState != null) {
+            dismissMapContextMenu(controller)
+            return
+        }
+
+        // Priority guard: do not hijack active modal/draft/pick/editor workflows
+        if (current.routeDraft.isActive ||
+            current.isPickingPlacemarkLocation ||
+            current.activeModal != null ||
+            current.settingsPopupOpen ||
+            current.placemarkEditorState != null ||
+            current.routeMetadataEditorTarget != null ||
+            current.savedAreaEditorState != null ||
+            current.plannedActionNotice != null
+        ) {
+            return
+        }
+
+        openAreaDetailsAt(
+            latitude = latitude,
+            longitude = longitude,
+            controller = controller,
+            moveCamera = false,
+            forceOnlineRefresh = false
+        )
+    }
+
+    fun openAreaDetailsAt(
+        latitude: Double,
+        longitude: Double,
+        controller: MapEngineController? = null,
+        moveCamera: Boolean = false,
+        forceOnlineRefresh: Boolean = false
+    ) {
+        if (!RoutePoint(latitude, longitude).isValid()) return
+
+        areaLookupJob?.cancel()
+        contextLookupJob?.cancel()
+
+        controller?.setAreaSelectionPin(latitude, longitude)
+        if (moveCamera) {
+            controller?.centerOnLocation(latitude, longitude, 16.0)
+        }
+
+        val screenPos = controller?.projectToScreen(latitude, longitude)
+        val allowOnline = isNetworkLookupPermitted()
+
+        _uiState.value = _uiState.value.copy(
+            activeModal = null,
+            settingsPopupOpen = false,
+            mapContextMenuState = null,
+            selectedPlacemark = null,
+            selectedRoute = null,
+            areaDetailsState = AreaDetailsUiState(
+                latitude = latitude,
+                longitude = longitude,
+                screenX = screenPos?.x,
+                screenY = screenPos?.y,
+                isExpanded = true,
+                details = AreaDetailsResult(
+                    latitude = latitude,
+                    longitude = longitude,
+                    isLoadingOnline = allowOnline,
+                    isOffline = !allowOnline
+                )
+            )
+        )
+        controller?.updateUserPlacemarks(_uiState.value.placemarks, null)
+        controller?.updateSavedRoutes(_uiState.value.savedRoutes, null)
+
+        areaLookupJob = viewModelScope.launch {
+            try {
+                val localSnapshot = areaRepository.queryLocalSnapshot(latitude, longitude)
+                val activeCheck = _uiState.value.areaDetailsState ?: return@launch
+                if (activeCheck.latitude != latitude || activeCheck.longitude != longitude) return@launch
+
+                val shouldRunOnline = forceOnlineRefresh || !localSnapshot.isSavedSnapshot
+                val isLoading = shouldRunOnline && allowOnline
+                val preSelected = localSnapshot.nearbyPlaces.filter { it.selectedForSave }.map { it.id }.toSet()
+
+                _uiState.value = _uiState.value.copy(
+                    areaDetailsState = _uiState.value.areaDetailsState?.copy(
+                        details = localSnapshot.copy(
+                            isLoadingOnline = isLoading,
+                            isOffline = !allowOnline && shouldRunOnline
+                        ),
+                        selectedNearbyIdsForSave = preSelected,
+                        userNotesDraft = localSnapshot.userNotes,
+                        customNameDraft = localSnapshot.locationIdentity?.primaryName.orEmpty()
+                    )
+                )
+
+                if (!shouldRunOnline) {
+                    return@launch
+                }
+
+                val enriched = areaRepository.enrichWithOnlineData(
+                    localBaseline = localSnapshot,
+                    isOnlineAllowed = allowOnline,
+                    forceRefresh = forceOnlineRefresh
+                )
+
+                val postCheck = _uiState.value.areaDetailsState ?: return@launch
+                if (postCheck.latitude != latitude || postCheck.longitude != longitude) return@launch
+
+                val updatedSelectedIds = (postCheck.selectedNearbyIdsForSave +
+                    enriched.nearbyPlaces.filter { it.selectedForSave }.map { it.id }).toSet()
+
+                _uiState.value = _uiState.value.copy(
+                    areaDetailsState = postCheck.copy(
+                        details = enriched,
+                        selectedNearbyIdsForSave = updatedSelectedIds,
+                        customNameDraft = postCheck.customNameDraft.ifBlank {
+                            enriched.locationIdentity?.primaryName.orEmpty()
+                        }
+                    )
+                )
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (e: Throwable) {
+                val active = _uiState.value.areaDetailsState ?: return@launch
+                _uiState.value = _uiState.value.copy(
+                    areaDetailsState = active.copy(
+                        details = active.details.copy(
+                            isLoadingOnline = false,
+                            errorMessage = e.message ?: "Unable to resolve area details."
+                        )
+                    )
+                )
+            }
+        }
+    }
+
+    fun dismissAreaDetails(controller: MapEngineController? = null) {
+        areaLookupJob?.cancel()
+        areaLookupJob = null
+        _uiState.value = _uiState.value.copy(areaDetailsState = null)
+        if (_uiState.value.mapContextMenuState == null) {
+            controller?.clearAreaSelectionPin()
+        }
+    }
+
+    fun toggleAreaDetailsExpanded() {
+        val current = _uiState.value.areaDetailsState ?: return
+        _uiState.value = _uiState.value.copy(
+            areaDetailsState = current.copy(isExpanded = !current.isExpanded)
+        )
+    }
+
+    fun toggleAreaNearbyItemForSave(itemId: String) {
+        val current = _uiState.value.areaDetailsState ?: return
+        val nextSet = if (current.selectedNearbyIdsForSave.contains(itemId)) {
+            current.selectedNearbyIdsForSave - itemId
+        } else {
+            current.selectedNearbyIdsForSave + itemId
+        }
+        _uiState.value = _uiState.value.copy(
+            areaDetailsState = current.copy(selectedNearbyIdsForSave = nextSet)
+        )
+    }
+
+    fun updateAreaCustomNameDraft(name: String) {
+        val current = _uiState.value.areaDetailsState ?: return
+        _uiState.value = _uiState.value.copy(
+            areaDetailsState = current.copy(customNameDraft = name)
+        )
+    }
+
+    fun updateAreaNotesDraft(notes: String) {
+        val current = _uiState.value.areaDetailsState ?: return
+        _uiState.value = _uiState.value.copy(
+            areaDetailsState = current.copy(userNotesDraft = notes)
+        )
+    }
+
+    fun saveCurrentAreaDetails(
+        customName: String? = null,
+        userNotes: String? = null
+    ) {
+        val current = _uiState.value.areaDetailsState ?: return
+        viewModelScope.launch {
+            val resolvedName = (customName ?: current.customNameDraft).trim().takeIf { it.isNotEmpty() }
+            val resolvedNotes = userNotes ?: current.userNotesDraft
+            val outcome = areaRepository.saveAreaSnapshot(
+                result = current.details,
+                customName = resolvedName,
+                selectedNearbyIds = current.selectedNearbyIdsForSave,
+                userNotes = resolvedNotes
+            )
+            outcome.fold(
+                onSuccess = { savedEntity ->
+                    val reloaded = areaRepository.queryLocalSnapshot(savedEntity.latitude, savedEntity.longitude)
+                    val refreshedCurrent = _uiState.value.areaDetailsState
+                    if (refreshedCurrent != null &&
+                        refreshedCurrent.latitude == current.latitude &&
+                        refreshedCurrent.longitude == current.longitude
+                    ) {
+                        _uiState.value = _uiState.value.copy(
+                            areaDetailsState = refreshedCurrent.copy(
+                                details = reloaded,
+                                selectedNearbyIdsForSave = reloaded.nearbyPlaces.map { it.id }.toSet(),
+                                userNotesDraft = savedEntity.userNotes,
+                                customNameDraft = savedEntity.name
+                            ),
+                            userFeedbackMessage = "Saved area '${savedEntity.name}' offline"
+                        )
+                    } else {
+                        _uiState.value = _uiState.value.copy(
+                            userFeedbackMessage = "Saved area '${savedEntity.name}' offline"
+                        )
+                    }
+                    refreshStorageReport()
+                },
+                onFailure = { err ->
+                    _uiState.value = _uiState.value.copy(
+                        userFeedbackMessage = err.message ?: "Unable to save area offline."
+                    )
+                }
+            )
+        }
+    }
+
+    fun refreshAreaDetailsOnline(controller: MapEngineController? = null) {
+        val current = _uiState.value.areaDetailsState ?: return
+        if (!isNetworkLookupPermitted()) {
+            _uiState.value = _uiState.value.copy(
+                areaDetailsState = current.copy(
+                    details = current.details.copy(
+                        isLoadingOnline = false,
+                        isOffline = true,
+                        partialWarning = "Internet is off or device is offline. Enable internet to refresh online details."
+                    )
+                ),
+                userFeedbackMessage = "Cannot refresh online: Internet is offline or blocked."
+            )
+            return
+        }
+        openAreaDetailsAt(
+            latitude = current.latitude,
+            longitude = current.longitude,
+            controller = controller,
+            moveCamera = false,
+            forceOnlineRefresh = true
+        )
+    }
+
+    fun openSavedAreaOnMap(area: SavedAreaEntity, controller: MapEngineController? = null) {
+        areaLookupJob?.cancel()
+        contextLookupJob?.cancel()
+        controller?.centerOnLocation(area.latitude, area.longitude, 16.0)
+        controller?.setAreaSelectionPin(area.latitude, area.longitude)
+        val screenPos = controller?.projectToScreen(area.latitude, area.longitude)
+
+        _uiState.value = _uiState.value.copy(
+            activeModal = null,
+            settingsPopupOpen = false,
+            mapContextMenuState = null,
+            selectedPlacemark = null,
+            selectedRoute = null
+        )
+
+        areaLookupJob = viewModelScope.launch {
+            val snapshot = areaRepository.queryLocalSnapshot(area.latitude, area.longitude)
+            _uiState.value = _uiState.value.copy(
+                areaDetailsState = AreaDetailsUiState(
+                    latitude = area.latitude,
+                    longitude = area.longitude,
+                    screenX = screenPos?.x,
+                    screenY = screenPos?.y,
+                    isExpanded = true,
+                    details = snapshot,
+                    selectedNearbyIdsForSave = snapshot.nearbyPlaces.map { it.id }.toSet(),
+                    userNotesDraft = area.userNotes,
+                    customNameDraft = area.name
+                )
+            )
+        }
+    }
+
+    fun openSavedAreaEditor(area: SavedAreaEntity) {
+        _uiState.value = _uiState.value.copy(
+            savedAreaEditorState = SavedAreaEditorState(
+                areaId = area.id,
+                name = area.name,
+                category = area.category,
+                addressLabel = area.addressLabel,
+                userNotes = area.userNotes,
+                tagsText = area.tagsCsv
+            )
+        )
+    }
+
+    fun dismissSavedAreaEditor() {
+        _uiState.value = _uiState.value.copy(savedAreaEditorState = null)
+    }
+
+    fun saveEditedAreaMetadata(
+        areaId: String,
+        name: String,
+        category: String,
+        addressLabel: String,
+        userNotes: String,
+        tagsText: String
+    ) {
+        viewModelScope.launch {
+            val result = areaRepository.updateSavedAreaMetadata(
+                areaId = areaId,
+                name = name,
+                category = category,
+                addressLabel = addressLabel,
+                userNotes = userNotes,
+                tagsText = tagsText
+            )
+            result.fold(
+                onSuccess = { updated ->
+                    val active = _uiState.value.areaDetailsState
+                    val refreshedAreaDetails = if (active?.details?.savedAreaId == updated.id) {
+                        val reloaded = areaRepository.queryLocalSnapshot(updated.latitude, updated.longitude)
+                        active.copy(
+                            details = reloaded,
+                            userNotesDraft = updated.userNotes,
+                            customNameDraft = updated.name
+                        )
+                    } else {
+                        active
+                    }
+                    _uiState.value = _uiState.value.copy(
+                        savedAreaEditorState = null,
+                        areaDetailsState = refreshedAreaDetails,
+                        userFeedbackMessage = "Updated saved area '${updated.name}'"
+                    )
+                },
+                onFailure = { err ->
+                    val currentEditor = _uiState.value.savedAreaEditorState ?: return@fold
+                    _uiState.value = _uiState.value.copy(
+                        savedAreaEditorState = currentEditor.copy(
+                            name = name,
+                            category = category,
+                            addressLabel = addressLabel,
+                            userNotes = userNotes,
+                            tagsText = tagsText,
+                            errorMessage = err.message ?: "Unable to update saved area."
+                        )
+                    )
+                }
+            )
+        }
+    }
+
+    fun refreshSavedAreaFromWorkspace(areaId: String) {
+        viewModelScope.launch {
+            val allowed = isNetworkLookupPermitted()
+            val result = areaRepository.refreshSavedAreaOnline(areaId, isOnlineAllowed = allowed)
+            result.fold(
+                onSuccess = { updated ->
+                    val active = _uiState.value.areaDetailsState
+                    val nextActive = if (active?.details?.savedAreaId == updated.id) {
+                        val reloaded = areaRepository.queryLocalSnapshot(updated.latitude, updated.longitude)
+                        active.copy(
+                            details = reloaded,
+                            customNameDraft = updated.name,
+                            userNotesDraft = updated.userNotes
+                        )
+                    } else {
+                        active
+                    }
+                    _uiState.value = _uiState.value.copy(
+                        areaDetailsState = nextActive,
+                        userFeedbackMessage = "Refreshed '${updated.name}' online"
+                    )
+                },
+                onFailure = { err ->
+                    _uiState.value = _uiState.value.copy(
+                        userFeedbackMessage = err.message ?: "Unable to refresh saved area online."
+                    )
+                }
+            )
+        }
+    }
+
+    fun deleteSavedArea(areaId: String, controller: MapEngineController? = null) {
+        viewModelScope.launch {
+            val deleted = areaRepository.deleteSavedArea(areaId)
+            if (deleted) {
+                val active = _uiState.value.areaDetailsState
+                val nextActive = if (active?.details?.savedAreaId == areaId) {
+                    val reloaded = areaRepository.queryLocalSnapshot(active.latitude, active.longitude)
+                    active.copy(details = reloaded)
+                } else {
+                    active
+                }
+                _uiState.value = _uiState.value.copy(
+                    areaDetailsState = nextActive,
+                    savedAreaEditorState = if (_uiState.value.savedAreaEditorState?.areaId == areaId) null else _uiState.value.savedAreaEditorState,
+                    userFeedbackMessage = "Saved area deleted"
+                )
+                refreshStorageReport()
+            }
+        }
+    }
+
+    // --- Long-Press Map Context Menu & Actions ---
+
+    fun onMapLongPressed(
+        latitude: Double,
+        longitude: Double,
+        controller: MapEngineController? = null
+    ) {
+        if (!RoutePoint(latitude, longitude).isValid()) return
+        val current = _uiState.value
+        if (current.routeDraft.isActive ||
+            current.isPickingPlacemarkLocation ||
+            current.activeModal != null ||
+            current.settingsPopupOpen ||
+            current.placemarkEditorState != null ||
+            current.routeMetadataEditorTarget != null ||
+            current.savedAreaEditorState != null ||
+            current.plannedActionNotice != null
+        ) {
+            return
+        }
+
+        areaLookupJob?.cancel()
+        contextLookupJob?.cancel()
+        controller?.setAreaSelectionPin(latitude, longitude)
+        val screenPos = controller?.projectToScreen(latitude, longitude)
+
+        _uiState.value = _uiState.value.copy(
+            areaDetailsState = null,
+            mapContextMenuState = MapContextMenuUiState(
+                latitude = latitude,
+                longitude = longitude,
+                screenX = screenPos?.x,
+                screenY = screenPos?.y,
+                isResolvingMatches = true
+            )
+        )
+
+        contextLookupJob = viewModelScope.launch {
+            try {
+                val matches = areaRepository.findContextMatchesAt(latitude, longitude)
+                val activeCtx = _uiState.value.mapContextMenuState ?: return@launch
+                if (activeCtx.latitude == latitude && activeCtx.longitude == longitude) {
+                    _uiState.value = _uiState.value.copy(
+                        mapContextMenuState = activeCtx.copy(
+                            isResolvingMatches = false,
+                            matches = matches
+                        )
+                    )
+                }
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (_: Throwable) {
+                val activeCtx = _uiState.value.mapContextMenuState ?: return@launch
+                _uiState.value = _uiState.value.copy(
+                    mapContextMenuState = activeCtx.copy(isResolvingMatches = false)
+                )
+            }
+        }
+    }
+
+    fun dismissMapContextMenu(controller: MapEngineController? = null) {
+        contextLookupJob?.cancel()
+        contextLookupJob = null
+        _uiState.value = _uiState.value.copy(mapContextMenuState = null)
+        if (_uiState.value.areaDetailsState == null) {
+            controller?.clearAreaSelectionPin()
+        }
+    }
+
+    fun contextOpenExistingSavedArea(controller: MapEngineController? = null) {
+        val area = _uiState.value.mapContextMenuState?.matches?.savedArea ?: return
+        openSavedAreaOnMap(area, controller)
+    }
+
+    fun contextOpenExistingPlacemark(controller: MapEngineController? = null) {
+        val place = _uiState.value.mapContextMenuState?.matches?.placemark ?: return
+        _uiState.value = _uiState.value.copy(mapContextMenuState = null)
+        controller?.clearAreaSelectionPin()
+        selectPlacemark(place, controller)
+    }
+
+    fun contextOpenExistingRoute(controller: MapEngineController? = null) {
+        val route = _uiState.value.mapContextMenuState?.matches?.route ?: return
+        _uiState.value = _uiState.value.copy(mapContextMenuState = null)
+        controller?.clearAreaSelectionPin()
+        selectSavedRoute(route, controller)
+    }
+
+    fun contextAddPlacemarkHere(controller: MapEngineController? = null) {
+        val ctx = _uiState.value.mapContextMenuState ?: return
+        controller?.clearAreaSelectionPin()
+        val suggestedName = AreaCoordinateFormatter.suggestedLabelFromMatch(ctx.matches)
+        val suggestedAddr = AreaCoordinateFormatter.suggestedAddressFromSavedArea(ctx.matches.savedArea)
+        _uiState.value = _uiState.value.copy(
+            mapContextMenuState = null,
+            isPickingPlacemarkLocation = false,
+            placemarkEditorState = PlacemarkEditorState(
+                editingPlaceId = null,
+                name = suggestedName,
+                addressLabel = suggestedAddr,
+                latitude = ctx.latitude,
+                longitude = ctx.longitude,
+                nearbyDuplicatePlace = ctx.matches.placemark
+            )
+        )
+    }
+
+    fun contextOpenAreaDetails(controller: MapEngineController? = null) {
+        val ctx = _uiState.value.mapContextMenuState ?: return
+        openAreaDetailsAt(
+            latitude = ctx.latitude,
+            longitude = ctx.longitude,
+            controller = controller,
+            moveCamera = false,
+            forceOnlineRefresh = false
+        )
+    }
+
+    fun contextWikiSearchArea(controller: MapEngineController? = null) {
+        val ctx = _uiState.value.mapContextMenuState ?: return
+        openAreaDetailsAt(
+            latitude = ctx.latitude,
+            longitude = ctx.longitude,
+            controller = controller,
+            moveCamera = false,
+            forceOnlineRefresh = isNetworkLookupPermitted()
+        )
+    }
+
+    fun contextRouteFromHere(controller: MapEngineController? = null) {
+        val ctx = _uiState.value.mapContextMenuState ?: return
+        val origin = RoutePoint(ctx.latitude, ctx.longitude)
+        if (!origin.isValid()) return
+        controller?.clearAreaSelectionPin()
+        val startPoints = listOf(origin)
+        _uiState.value = _uiState.value.copy(
+            mapContextMenuState = null,
+            areaDetailsState = null,
+            selectedPlacemark = null,
+            selectedRoute = null,
+            routeDraft = RouteDraftUiState(
+                isActive = true,
+                points = startPoints,
+                waypointNamesByPointIndex = mapOf(0 to "Start")
+            ),
+            userFeedbackMessage = "Route started at pressed location. Tap map to add points."
+        )
+        controller?.updateRouteDraftOverlay(startPoints)
+    }
+
+    fun contextRouteToHere(controller: MapEngineController? = null) {
+        val ctx = _uiState.value.mapContextMenuState ?: return
+        val destination = RoutePoint(ctx.latitude, ctx.longitude)
+        if (!destination.isValid()) return
+        controller?.clearAreaSelectionPin()
+        val cam = _uiState.value.camera
+        val centerOrigin = RoutePoint(cam.latitude, cam.longitude)
+        val distanceFromCenter = if (centerOrigin.isValid()) {
+            RouteGeometryCodec.haversineMeters(
+                centerOrigin.latitude,
+                centerOrigin.longitude,
+                destination.latitude,
+                destination.longitude
+            )
+        } else {
+            0.0
+        }
+
+        val draftPoints: List<RoutePoint>
+        val waypointMap: Map<Int, String>
+        val msg: String
+        if (centerOrigin.isValid() && distanceFromCenter >= 25.0) {
+            draftPoints = listOf(centerOrigin, destination)
+            waypointMap = mapOf(0 to "Origin", 1 to "Destination")
+            msg = "Draft route created from map center to destination."
+        } else {
+            draftPoints = listOf(destination)
+            waypointMap = mapOf(0 to "Destination")
+            msg = "Destination set. Tap another map point to complete route."
+        }
+
+        _uiState.value = _uiState.value.copy(
+            mapContextMenuState = null,
+            areaDetailsState = null,
+            selectedPlacemark = null,
+            selectedRoute = null,
+            routeDraft = RouteDraftUiState(
+                isActive = true,
+                points = draftPoints,
+                waypointNamesByPointIndex = waypointMap
+            ),
+            userFeedbackMessage = msg
+        )
+        controller?.updateRouteDraftOverlay(draftPoints)
+    }
+
+    fun contextShowPlannedAction(
+        title: String,
+        featureGroup: String,
+        summary: String,
+        plannedBehavior: String,
+        controller: MapEngineController? = null
+    ) {
+        val ctx = _uiState.value.mapContextMenuState ?: return
+        controller?.clearAreaSelectionPin()
+        _uiState.value = _uiState.value.copy(
+            mapContextMenuState = null,
+            plannedActionNotice = PlannedActionNoticeState(
+                title = title,
+                featureGroup = featureGroup,
+                latitude = ctx.latitude,
+                longitude = ctx.longitude,
+                summary = summary,
+                plannedBehavior = plannedBehavior
+            )
+        )
+    }
+
+    fun dismissPlannedActionNotice() {
+        _uiState.value = _uiState.value.copy(plannedActionNotice = null)
+    }
+
     override fun onCleared() {
         super.onCleared()
         searchJob?.cancel()
+        areaLookupJob?.cancel()
+        contextLookupJob?.cancel()
         networkMonitor.unregister()
     }
 }

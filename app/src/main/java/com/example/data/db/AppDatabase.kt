@@ -174,6 +174,22 @@ interface OsmPoiDao {
     @Query("SELECT * FROM osm_pois ORDER BY name ASC LIMIT :limit")
     suspend fun getAllPois(limit: Int = 100): List<OsmPoiRecord>
 
+    @Query(
+        """
+        SELECT * FROM osm_pois
+        WHERE latitude BETWEEN :minLat AND :maxLat
+          AND longitude BETWEEN :minLng AND :maxLng
+        LIMIT :limit
+        """
+    )
+    suspend fun getPoisInBoundingBox(
+        minLat: Double,
+        maxLat: Double,
+        minLng: Double,
+        maxLng: Double,
+        limit: Int = 150
+    ): List<OsmPoiRecord>
+
     @Query("DELETE FROM osm_pois")
     suspend fun clearAllPois()
 }
@@ -200,6 +216,22 @@ interface OsmBuildingDao {
 
     @Query("SELECT COUNT(*) FROM osm_buildings")
     suspend fun getBuildingCount(): Int
+
+    @Query(
+        """
+        SELECT * FROM osm_buildings
+        WHERE centroidLat BETWEEN :minLat AND :maxLat
+          AND centroidLng BETWEEN :minLng AND :maxLng
+        LIMIT :limit
+        """
+    )
+    suspend fun getBuildingsInBoundingBox(
+        minLat: Double,
+        maxLat: Double,
+        minLng: Double,
+        maxLng: Double,
+        limit: Int = 60
+    ): List<OsmBuildingRecord>
 }
 
 @Entity(tableName = "osm_regions")
@@ -220,6 +252,19 @@ interface OsmRegionDao {
 
     @Query("SELECT COUNT(*) FROM osm_regions")
     suspend fun getRegionCount(): Int
+
+    @Query(
+        """
+        SELECT * FROM osm_regions
+        WHERE sourceTileZ = :z AND sourceTileX = :x AND sourceTileY = :y
+        ORDER BY adminLevel ASC, name ASC
+        LIMIT :limit
+        """
+    )
+    suspend fun getRegionsByTile(z: Int, x: Int, y: Int, limit: Int = 30): List<OsmRegionRecord>
+
+    @Query("SELECT * FROM osm_regions ORDER BY adminLevel ASC, name ASC LIMIT :limit")
+    suspend fun getRecentRegions(limit: Int = 30): List<OsmRegionRecord>
 }
 
 @Entity(tableName = "osm_roads")
@@ -241,6 +286,16 @@ interface OsmRoadDao {
 
     @Query("SELECT COUNT(*) FROM osm_roads")
     suspend fun getRoadCount(): Int
+
+    @Query(
+        """
+        SELECT * FROM osm_roads
+        WHERE sourceTileZ = :z AND sourceTileX = :x AND sourceTileY = :y
+          AND name IS NOT NULL AND TRIM(name) != ''
+        LIMIT :limit
+        """
+    )
+    suspend fun getNamedRoadsByTile(z: Int, x: Int, y: Int, limit: Int = 60): List<OsmRoadRecord>
 }
 
 @Entity(
@@ -430,6 +485,76 @@ interface SavedRouteDao {
     }
 }
 
+@Entity(
+    tableName = "saved_areas",
+    indices = [
+        Index(value = ["updatedAt"]),
+        Index(value = ["latitude", "longitude"])
+    ]
+)
+data class SavedAreaEntity(
+    @PrimaryKey val id: String,
+    val name: String,
+    val latitude: Double,
+    val longitude: Double,
+    val addressLabel: String = "",
+    val locality: String = "",
+    val region: String = "",
+    val country: String = "",
+    val featureName: String = "",
+    val category: String = "area",
+    val geographicDetails: String = "",
+    val nearbySummaryJson: String = "[]",
+    val retainedNearbyCount: Int = 0,
+    val wikiTitle: String? = null,
+    val wikiSummary: String? = null,
+    val wikiUrl: String? = null,
+    val wikidataId: String? = null,
+    val sourceAttribution: String = "",
+    val dataProvenance: String = "LOCAL_ONLY",
+    val userNotes: String = "",
+    val tagsCsv: String = "",
+    val retrievedAt: Long = System.currentTimeMillis(),
+    val createdAt: Long = System.currentTimeMillis(),
+    val updatedAt: Long = System.currentTimeMillis()
+)
+
+@Dao
+interface SavedAreaDao {
+    @Query("SELECT * FROM saved_areas ORDER BY updatedAt DESC")
+    fun observeSavedAreas(): Flow<List<SavedAreaEntity>>
+
+    @Query("SELECT * FROM saved_areas WHERE id = :id LIMIT 1")
+    suspend fun getSavedAreaById(id: String): SavedAreaEntity?
+
+    @Query(
+        """
+        SELECT * FROM saved_areas
+        WHERE latitude BETWEEN :minLat AND :maxLat
+          AND longitude BETWEEN :minLng AND :maxLng
+        ORDER BY updatedAt DESC
+        """
+    )
+    suspend fun getNearbySavedAreas(
+        minLat: Double,
+        maxLat: Double,
+        minLng: Double,
+        maxLng: Double
+    ): List<SavedAreaEntity>
+
+    @Query("SELECT COUNT(*) FROM saved_areas")
+    suspend fun getSavedAreaCount(): Int
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertSavedArea(area: SavedAreaEntity)
+
+    @Query("DELETE FROM saved_areas WHERE id = :id")
+    suspend fun deleteSavedAreaById(id: String): Int
+
+    @Query("DELETE FROM saved_areas")
+    suspend fun clearAllSavedAreas()
+}
+
 @Database(
     entities = [
         RetainedTileEntity::class,
@@ -440,7 +565,8 @@ interface SavedRouteDao {
         RoutingGraphTileRecord::class,
         UserPlaceEntity::class,
         SavedRouteEntity::class,
-        RouteWaypointEntity::class
+        RouteWaypointEntity::class,
+        SavedAreaEntity::class
     ],
     version = AppDatabaseContract.CURRENT_VERSION,
     exportSchema = false
@@ -454,6 +580,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun routingGraphTileDao(): RoutingGraphTileDao
     abstract fun userPlaceDao(): UserPlaceDao
     abstract fun savedRouteDao(): SavedRouteDao
+    abstract fun savedAreaDao(): SavedAreaDao
 
     companion object {
         @Volatile
@@ -523,6 +650,44 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `saved_areas` (
+                        `id` TEXT NOT NULL,
+                        `name` TEXT NOT NULL,
+                        `latitude` REAL NOT NULL,
+                        `longitude` REAL NOT NULL,
+                        `addressLabel` TEXT NOT NULL,
+                        `locality` TEXT NOT NULL,
+                        `region` TEXT NOT NULL,
+                        `country` TEXT NOT NULL,
+                        `featureName` TEXT NOT NULL,
+                        `category` TEXT NOT NULL,
+                        `geographicDetails` TEXT NOT NULL,
+                        `nearbySummaryJson` TEXT NOT NULL,
+                        `retainedNearbyCount` INTEGER NOT NULL,
+                        `wikiTitle` TEXT,
+                        `wikiSummary` TEXT,
+                        `wikiUrl` TEXT,
+                        `wikidataId` TEXT,
+                        `sourceAttribution` TEXT NOT NULL,
+                        `dataProvenance` TEXT NOT NULL,
+                        `userNotes` TEXT NOT NULL,
+                        `tagsCsv` TEXT NOT NULL,
+                        `retrievedAt` INTEGER NOT NULL,
+                        `createdAt` INTEGER NOT NULL,
+                        `updatedAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`id`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_saved_areas_updatedAt` ON `saved_areas` (`updatedAt`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_saved_areas_latitude_longitude` ON `saved_areas` (`latitude`, `longitude`)")
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return instance ?: synchronized(this) {
                 instance ?: Room.databaseBuilder(
@@ -530,7 +695,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     AppDatabaseContract.DATABASE_NAME
                 )
-                    .addMigrations(MIGRATION_1_2)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                     .fallbackToDestructiveMigration(false)
                     .build().also { instance = it }
             }

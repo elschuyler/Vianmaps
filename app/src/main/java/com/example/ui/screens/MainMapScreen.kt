@@ -44,13 +44,17 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.map.engine.MapEngineController
 import com.example.ui.components.AppModalManager
+import com.example.ui.components.AreaDetailsPopup
 import com.example.ui.components.BottomNavigationBar
+import com.example.ui.components.MapContextMenu
 import com.example.ui.components.PickLocationHudBanner
 import com.example.ui.components.PlacemarkEditorDialog
+import com.example.ui.components.PlannedActionNoticeDialog
 import com.example.ui.components.RightSideMapControls
 import com.example.ui.components.RouteCreationHudBar
 import com.example.ui.components.RouteMetadataEditorDialog
 import com.example.ui.components.SaveRouteDialog
+import com.example.ui.components.SavedAreaEditorDialog
 import com.example.ui.components.SelectedPlacemarkBanner
 import com.example.ui.components.SelectedPoiHighlightBanner
 import com.example.ui.components.SelectedRouteBanner
@@ -90,20 +94,28 @@ fun MainMapScreen(
     // Back from Log Keeper, More Settings, Backup & Restore returns directly to Map
     // Back while compact popup is open dismisses the popup
     BackHandler(
-        enabled = uiState.placemarkEditorState != null ||
+        enabled = uiState.savedAreaEditorState != null ||
+            uiState.plannedActionNotice != null ||
+            uiState.placemarkEditorState != null ||
             uiState.routeMetadataEditorTarget != null ||
             uiState.routeDraft.showSaveDialog ||
             uiState.routeDraft.isActive ||
             uiState.isPickingPlacemarkLocation ||
+            uiState.mapContextMenuState != null ||
+            uiState.areaDetailsState != null ||
             uiState.activeModal != null ||
             uiState.settingsPopupOpen
     ) {
         when {
+            uiState.savedAreaEditorState != null -> viewModel.dismissSavedAreaEditor()
+            uiState.plannedActionNotice != null -> viewModel.dismissPlannedActionNotice()
             uiState.placemarkEditorState != null -> viewModel.dismissPlacemarkEditor()
             uiState.routeMetadataEditorTarget != null -> viewModel.dismissRouteMetadataEditor()
             uiState.routeDraft.showSaveDialog -> viewModel.dismissSaveRouteDialog()
             uiState.routeDraft.isActive -> viewModel.cancelRouteDraft(controller)
             uiState.isPickingPlacemarkLocation -> viewModel.cancelPickPlacemarkOnMap()
+            uiState.mapContextMenuState != null -> viewModel.dismissMapContextMenu(controller)
+            uiState.areaDetailsState != null -> viewModel.dismissAreaDetails(controller)
             uiState.settingsPopupOpen -> viewModel.closeSettingsPopup()
             uiState.activeModal is ActiveModal.MapCatalogue -> viewModel.openModal(ActiveModal.MoreSettings)
             else -> viewModel.closeModal()
@@ -158,7 +170,13 @@ fun MainMapScreen(
         }
     }
 
-    // Wire interactive map tap, long-press, placemark tap, and route tap handlers without recreating MapView
+    LaunchedEffect(uiState.camera.latitude, uiState.camera.longitude, uiState.camera.zoom, uiState.camera.bearing) {
+        if (uiState.areaDetailsState != null || uiState.mapContextMenuState != null) {
+            viewModel.updateAnchoredScreenCoordinates(controller)
+        }
+    }
+
+    // Wire interactive map tap, long-press, placemark tap, route tap, and POI tap handlers without recreating MapView
     LaunchedEffect(controller) {
         controller.onMapTap = { lat, lng ->
             val current = viewModel.uiState.value
@@ -174,23 +192,26 @@ fun MainMapScreen(
                 else -> false
             }
         }
+        controller.onEmptyMapSingleTap = { lat, lng ->
+            viewModel.onEmptyMapSingleTap(lat, lng, controller)
+        }
         controller.onMapLongPress = { lat, lng ->
-            val current = viewModel.uiState.value
-            if (!current.routeDraft.isActive &&
-                !current.isPickingPlacemarkLocation &&
-                current.activeModal == null &&
-                !current.settingsPopupOpen &&
-                current.placemarkEditorState == null &&
-                current.routeMetadataEditorTarget == null
-            ) {
-                viewModel.onMapCoordinatePickedForPlacemark(lat, lng)
-            }
+            viewModel.onMapLongPressed(lat, lng, controller)
         }
         controller.onPlacemarkTapped = { placeId ->
+            viewModel.dismissAreaDetails(controller)
+            viewModel.dismissMapContextMenu(controller)
             viewModel.selectPlacemarkById(placeId, controller)
         }
         controller.onRouteTapped = { routeId ->
+            viewModel.dismissAreaDetails(controller)
+            viewModel.dismissMapContextMenu(controller)
             viewModel.selectSavedRouteById(routeId, controller)
+        }
+        controller.onHighlightedPoiTapped = {
+            viewModel.dismissAreaDetails(controller)
+            viewModel.dismissMapContextMenu(controller)
+            viewModel.recenterOnHighlightedPoi(controller)
         }
     }
 
@@ -376,6 +397,11 @@ fun MainMapScreen(
                     )
                     if (snapshotState.routeDraft.isActive) {
                         controller.updateRouteDraftOverlay(snapshotState.routeDraft.points)
+                    }
+                    val pinTarget = snapshotState.areaDetailsState?.let { it.latitude to it.longitude }
+                        ?: snapshotState.mapContextMenuState?.let { it.latitude to it.longitude }
+                    if (pinTarget != null) {
+                        controller.setAreaSelectionPin(pinTarget.first, pinTarget.second)
                     }
                     controller.attachMap(
                         map = maplibreMap,
@@ -629,12 +655,60 @@ fun MainMapScreen(
                     .padding(start = 8.dp, bottom = 8.dp)
             )
 
-            // Exclusive floating map HUD / inspection banner above bottom bar when no modal or popup is open
+            // Anchored, non-blocking Area Details Popup & Long-Press Context Menu
+            // Rendered cleanly over MapView so surrounding gestures (pan/pinch/double-tap) work naturally.
+            if (uiState.activeModal == null && !uiState.settingsPopupOpen) {
+                val activeContextMenu = uiState.mapContextMenuState
+                val activeAreaDetails = uiState.areaDetailsState
+                if (activeContextMenu != null) {
+                    MapContextMenu(
+                        state = activeContextMenu,
+                        onDismiss = { viewModel.dismissMapContextMenu(controller) },
+                        onOpenExistingSavedArea = { viewModel.contextOpenExistingSavedArea(controller) },
+                        onOpenExistingPlacemark = { viewModel.contextOpenExistingPlacemark(controller) },
+                        onOpenExistingRoute = { viewModel.contextOpenExistingRoute(controller) },
+                        onAddPlacemarkHere = { viewModel.contextAddPlacemarkHere(controller) },
+                        onOpenAreaDetails = { viewModel.contextOpenAreaDetails(controller) },
+                        onWikiSearchArea = { viewModel.contextWikiSearchArea(controller) },
+                        onRouteFromHere = { viewModel.contextRouteFromHere(controller) },
+                        onRouteToHere = { viewModel.contextRouteToHere(controller) },
+                        onPlannedAction = { title, group, summary, planned ->
+                            viewModel.contextShowPlannedAction(title, group, summary, planned, controller)
+                        }
+                    )
+                } else if (activeAreaDetails != null) {
+                    val linkedSavedArea = activeAreaDetails.details.savedAreaId?.let { id ->
+                        uiState.savedAreas.find { it.id == id }
+                    }
+                    AreaDetailsPopup(
+                        state = activeAreaDetails,
+                        savedAreaEntity = linkedSavedArea,
+                        onDismiss = { viewModel.dismissAreaDetails(controller) },
+                        onToggleExpanded = { viewModel.toggleAreaDetailsExpanded() },
+                        onToggleNearbySelection = { itemId -> viewModel.toggleAreaNearbyItemForSave(itemId) },
+                        onUpdateCustomName = { name -> viewModel.updateAreaCustomNameDraft(name) },
+                        onUpdateNotesDraft = { notes -> viewModel.updateAreaNotesDraft(notes) },
+                        onSaveArea = { viewModel.saveCurrentAreaDetails() },
+                        onEditSavedArea = { area -> viewModel.openSavedAreaEditor(area) },
+                        onRefreshOnline = { viewModel.refreshAreaDetailsOnline(controller) },
+                        onDeleteSavedArea = { areaId -> viewModel.deleteSavedArea(areaId, controller) },
+                        onCopyFeedback = { msg ->
+                            coroutineScope.launch { snackbarHostState.showSnackbar(msg) }
+                        }
+                    )
+                }
+            }
+
+            // Exclusive floating map HUD / inspection banner above bottom bar when no modal, context popup, or area details is open
             val hudModifier = Modifier
                 .align(Alignment.BottomStart)
                 .navigationBarsPadding()
                 .padding(start = 8.dp, end = 64.dp, bottom = 60.dp)
-            if (uiState.activeModal == null && !uiState.settingsPopupOpen) {
+            if (uiState.activeModal == null &&
+                !uiState.settingsPopupOpen &&
+                uiState.areaDetailsState == null &&
+                uiState.mapContextMenuState == null
+            ) {
                 val activeSelectedPlacemark = uiState.selectedPlacemark
                 val activeSelectedRoute = uiState.selectedRoute
                 val highlightedPoi = uiState.highlightedPoi
@@ -770,6 +844,9 @@ fun MainMapScreen(
                 onOpenRoutesWorkspace = {
                     viewModel.openModal(ActiveModal.RoutesWorkspace)
                 },
+                onOpenSavedAreasWorkspace = {
+                    viewModel.openModal(ActiveModal.SavedAreasWorkspace)
+                },
                 onStartCreatePlacemarkAtCenter = {
                     viewModel.startCreatePlacemarkAtMapCenter()
                 },
@@ -799,10 +876,48 @@ fun MainMapScreen(
                 },
                 onDeleteSavedRoute = { routeId ->
                     viewModel.deleteSavedRoute(routeId, controller)
+                },
+                onOpenSavedAreaOnMap = { area ->
+                    viewModel.openSavedAreaOnMap(area, controller)
+                },
+                onOpenEditSavedArea = { area ->
+                    viewModel.openSavedAreaEditor(area)
+                },
+                onRefreshSavedAreaOnline = { areaId ->
+                    viewModel.refreshSavedAreaFromWorkspace(areaId)
+                },
+                onDeleteSavedArea = { areaId ->
+                    viewModel.deleteSavedArea(areaId, controller)
                 }
             )
 
-            // Phase 4.1 Editor Dialogs
+            // Phase 4.1 & 4.2 Editor / Notice Dialogs
+            val savedAreaEditorState = uiState.savedAreaEditorState
+            if (savedAreaEditorState != null) {
+                SavedAreaEditorDialog(
+                    editorState = savedAreaEditorState,
+                    onDismiss = { viewModel.dismissSavedAreaEditor() },
+                    onSave = { name, cat, addr, notes, tags ->
+                        viewModel.saveEditedAreaMetadata(
+                            areaId = savedAreaEditorState.areaId,
+                            name = name,
+                            category = cat,
+                            addressLabel = addr,
+                            userNotes = notes,
+                            tagsText = tags
+                        )
+                    }
+                )
+            }
+
+            val plannedNotice = uiState.plannedActionNotice
+            if (plannedNotice != null) {
+                PlannedActionNoticeDialog(
+                    state = plannedNotice,
+                    onDismiss = { viewModel.dismissPlannedActionNotice() }
+                )
+            }
+
             val placemarkEditorState = uiState.placemarkEditorState
             if (placemarkEditorState != null) {
                 PlacemarkEditorDialog(

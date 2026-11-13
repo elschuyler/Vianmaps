@@ -33,6 +33,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.filled.CloudSync
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.PinDrop
 import androidx.compose.material.icons.filled.Route
 import androidx.compose.material.icons.filled.Tune
@@ -82,6 +83,7 @@ import androidx.compose.material.icons.filled.Layers
 import com.example.map.composition.MapComposition
 import androidx.compose.material.icons.filled.Terminal
 import com.example.data.db.OsmPoiRecord
+import com.example.data.db.SavedAreaEntity
 import com.example.data.db.UserPlaceEntity
 import com.example.data.places.SavedRouteModel
 import com.example.ui.screens.MapUiState
@@ -121,6 +123,7 @@ fun AppModalManager(
     onClearPoiHighlight: () -> Unit,
     onOpenPlacemarksWorkspace: () -> Unit,
     onOpenRoutesWorkspace: () -> Unit,
+    onOpenSavedAreasWorkspace: () -> Unit,
     onStartCreatePlacemarkAtCenter: () -> Unit,
     onStartPickPlacemarkOnMap: () -> Unit,
     onSelectPlacemarkOnMap: (UserPlaceEntity) -> Unit,
@@ -130,7 +133,11 @@ fun AppModalManager(
     onSelectRouteOnMap: (SavedRouteModel) -> Unit,
     onOpenEditRouteMetadata: (SavedRouteModel) -> Unit,
     onEditRouteGeometryOnMap: (SavedRouteModel) -> Unit,
-    onDeleteSavedRoute: (String) -> Unit
+    onDeleteSavedRoute: (String) -> Unit,
+    onOpenSavedAreaOnMap: (SavedAreaEntity) -> Unit,
+    onOpenEditSavedArea: (SavedAreaEntity) -> Unit,
+    onRefreshSavedAreaOnline: (String) -> Unit,
+    onDeleteSavedArea: (String) -> Unit
 ) {
     if (settingsPopupOpen) {
         FloatingPopupDialog(onDismiss = onDismissSettingsPopup) {
@@ -202,6 +209,7 @@ fun AppModalManager(
                 PlacesPopupContent(
                     placemarkCount = uiState.placemarks.size,
                     routeCount = uiState.savedRoutes.size,
+                    savedAreaCount = uiState.savedAreas.size,
                     onOpenPlacemarks = {
                         onDismissModal()
                         onOpenPlacemarksWorkspace()
@@ -209,6 +217,10 @@ fun AppModalManager(
                     onOpenRoutes = {
                         onDismissModal()
                         onOpenRoutesWorkspace()
+                    },
+                    onOpenSavedAreas = {
+                        onDismissModal()
+                        onOpenSavedAreasWorkspace()
                     },
                     onOpenMemoryPalace = {
                         onDismissModal()
@@ -239,6 +251,18 @@ fun AppModalManager(
                     onEditRouteMetadata = onOpenEditRouteMetadata,
                     onEditRouteGeometry = onEditRouteGeometryOnMap,
                     onDeleteRoute = onDeleteSavedRoute
+                )
+            }
+        }
+        is ActiveModal.SavedAreasWorkspace -> {
+            FullScreenModal(title = "Saved Areas", onClose = onDismissModal) {
+                SavedAreasWorkspaceContent(
+                    savedAreas = uiState.savedAreas,
+                    isOnlineAllowed = uiState.isInternetEnabled && isDeviceOnline,
+                    onOpenSavedAreaOnMap = onOpenSavedAreaOnMap,
+                    onEditSavedArea = onOpenEditSavedArea,
+                    onRefreshSavedAreaOnline = onRefreshSavedAreaOnline,
+                    onDeleteSavedArea = onDeleteSavedArea
                 )
             }
         }
@@ -677,8 +701,10 @@ fun MapsPopupContent(
 fun PlacesPopupContent(
     placemarkCount: Int,
     routeCount: Int,
+    savedAreaCount: Int,
     onOpenPlacemarks: () -> Unit,
     onOpenRoutes: () -> Unit,
+    onOpenSavedAreas: () -> Unit,
     onOpenMemoryPalace: () -> Unit,
     onClose: () -> Unit
 ) {
@@ -697,8 +723,11 @@ fun PlacesPopupContent(
 
         val placemarkLabel = if (placemarkCount == 1) "1 saved landmark" else "$placemarkCount saved landmarks"
         val routeLabel = if (routeCount == 1) "1 saved route" else "$routeCount saved routes"
+        val areaLabel = if (savedAreaCount == 1) "1 saved area snapshot" else "$savedAreaCount saved area snapshots"
 
         PlaceItemRow(title = "Placemarks", icon = Icons.Default.PinDrop, subtitle = placemarkLabel, onClick = onOpenPlacemarks)
+        Spacer(modifier = Modifier.height(2.dp))
+        PlaceItemRow(title = "Saved Areas", icon = Icons.Default.LocationOn, subtitle = areaLabel, onClick = onOpenSavedAreas)
         Spacer(modifier = Modifier.height(2.dp))
         PlaceItemRow(title = "Routes", icon = Icons.Default.Route, subtitle = routeLabel, onClick = onOpenRoutes)
         Spacer(modifier = Modifier.height(2.dp))

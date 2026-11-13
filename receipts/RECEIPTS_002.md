@@ -287,3 +287,38 @@ This file series is the project's permanent audit trail across sessions. Each fi
 * **Deviations from request**: None.
 * **Known issues / follow-up**: Physical-device verification of MapLibre GL rendering, tap/long-press hit detection, and saved-route creation across style switches requires manual testing on device. Valhalla offline turn-by-turn routing calculation remains planned for a future milestone.
 
+---
+
+### Entry 2026-11-13T22:45:30Z — Phase 4.2: Area Details Popup & Map Context Actions
+* **Summary**: Implement geographically anchored single-tap Area Details popup (adaptive local OSM + optional rate-limited Nominatim/Wikipedia enrichment + Saved Areas Room v3 CRUD) and long-press Map Context Menu with context-aware detection and honest Planned feature gating.
+* **Exact files touched**:
+  - `app/src/main/java/com/example/data/db/AppDatabaseContract.kt` (bumped `CURRENT_VERSION` to 3; documented `saved_areas`)
+  - `app/src/main/java/com/example/data/db/AppDatabase.kt` (added `SavedAreaEntity`, `SavedAreaDao`, bounding-box & tile OSM queries, `MIGRATION_2_3`, `.addMigrations(MIGRATION_1_2, MIGRATION_2_3)`)
+  - `app/src/main/java/com/example/data/storage/StorageCalculationManager.kt` (added `savedAreaCount` to `FeatureStorageReport`)
+  - `app/src/main/java/com/example/data/area/AreaLookupModels.kt` (added provenance/identity/wiki/result/match models and tolerant `SavedAreaNearbyCodec`)
+  - `app/src/main/java/com/example/data/area/AreaRemoteLookupGateway.kt` (added `HttpAreaRemoteLookupGateway` with identifiable `User-Agent`, mutex 1100 ms Nominatim rate limit, city/town `locality` mapping with neighbourhood fallback, Wikipedia Geosearch + REST summary disambiguation/distance filtering, and call cancellation)
+  - `app/src/main/java/com/example/data/area/AreaDetailsRepository.kt` (built adaptive 250 m -> 1 km local lookup, LRU TTL cache, in-flight request deduplication, `SavedAreaEntity` CRUD & online refresh, and `findContextMatchesAt`)
+  - `app/src/main/java/com/example/map/engine/MapEngineController.kt` (added `AREA_PIN_*` overlay, `projectToScreen`, `dispatchMapTap`/`dispatchMapLongPress` with 350 ms post-long-press click suppression, `HIGHLIGHT_CORE_LAYER_ID` hit priority, and tap handlers)
+  - `app/src/main/java/com/example/ui/screens/AreaContextState.kt` (added `AreaDetailsUiState`, `MapContextMenuUiState`, `SavedAreaEditorState`, `PlannedActionNoticeState`, and `AreaCoordinateFormatter`)
+  - `app/src/main/java/com/example/ui/screens/MapViewModel.kt` (added `ActiveModal.SavedAreasWorkspace`, `updateAnchoredScreenCoordinates`, cancellable `areaLookupJob`, offline/online Area Details lifecycle, `SavedAreaEntity` CRUD/refresh, context menu actions, and `configureAreaTesting` seam)
+  - `app/src/main/java/com/example/ui/components/AreaDetailsPopup.kt` (created non-blocking geographically anchored popup tracking screen projection with edge clamping, DD/DMS copy, nearby item selection, wiki link, snapshot warning, and Save/Edit/Refresh/Delete actions)
+  - `app/src/main/java/com/example/ui/components/MapContextMenu.kt` (created anchored long-press menu with Open Existing detection, functional Placemark/Area/Wiki/Route-From/Route-To actions, honestly badged `Planned` items, `PlannedActionNoticeDialog`, and `SavedAreaEditorDialog`)
+  - `app/src/main/java/com/example/ui/components/SavedAreasWorkspace.kt` (created `Places -> Saved Areas` offline browser with search filter, snapshot non-tile notice, Open on Map, Edit, Refresh Online, and Delete confirmation)
+  - `app/src/main/java/com/example/ui/components/AppModalManager.kt` (wired `Saved Areas` row in `PlacesPopupContent` and `ActiveModal.SavedAreasWorkspace`)
+  - `app/src/main/java/com/example/ui/components/MapCatalogueWorkspace.kt` (added `Saved Areas` count row in Section 4 Feature Store Accounting)
+  - `app/src/main/java/com/example/ui/screens/MainMapScreen.kt` (updated `BackHandler`, camera anchor projection `LaunchedEffect`, controller tap/long-press/POI handlers, pin sync, and anchored overlays while keeping `MapView` instantiation and `DisposableEffect(lifecycleOwner)` intact)
+  - `app/src/test/java/com/example/ExampleUnitTest.kt` (added tests 53–60 covering tap priority & long-press suppression, adaptive 250 m -> 1 km local lookup & offline snapshot mode, mocked HTTP Nominatim + Wikipedia disambiguation & partial error handling, request deduplication, SavedArea selective nearby persistence/edit/refresh/delete, SQLite v2->v3 migration & tile-clear preservation, ViewModel async tap lifecycle, and long-press context menu matching & Planned action honesty)
+  - `BLUEPRINT.md` (added Phase 4.2 phase summary and changelog)
+  - `receipts/RECEIPTS_002.md` (appended Phase 4.2 audit entry)
+* **What was actually done**:
+  - Upgraded Room `map_app_master.db` from v2 to v3 via `MIGRATION_2_3` without destructive migration, adding `saved_areas` while preserving all v1/v2 records and keeping tile cache clearing isolated from `saved_areas`.
+  - Delivered non-blocking single-tap Area Details lookup: opens immediately with coordinates, area pin, and adaptive-radius local OSM/saved-area data, then enriches asynchronously when online via rate-limited Nominatim + reliability-checked Wikipedia REST APIs (strictly cancellable on dismiss/new tap and deduplicated for concurrent calls).
+  - Delivered long-press Map Context Menu with 350 ms click suppression, matching existing Saved Areas / Placemarks / Routes / OSM POIs near the tap, functional Placemark / Area / Wiki / Route From & Route To triggers, and honestly labeled `Planned` notices for unbuilt Memory Palace Room, Note, To-do, and Measure features.
+* **How it was verified**:
+  - Local JVM Robolectric unit test suite (`gradle :app:testDebugUnitTest`): `TEST-com.example.ExampleUnitTest.xml` reported 60/60 tests passed (`tests="60"`, `skipped="0"`, `failures="0"`, `errors="0"`, BUILD SUCCESSFUL in 1m 23s).
+  - HTTP Nominatim/Wikipedia gateway verified against local mocked `OkHttpClient` interceptor (live external endpoints not hit in automated unit tests).
+  - Container applet compilation (`compile_applet`): verified clean build prior to docs edit; final `compile_applet` run pending immediately after docs update.
+  - On-device verification: Not tested on physical Android hardware or streaming emulator in this container (no emulator/ADB available; manual on-device QA steps provided).
+* **Deviations from request**: None.
+* **Known issues / follow-up**: Physical-device verification of MapLibre GL single-tap vs long-press gestures, live Nominatim/Wikipedia network lookups, anchored popup edge clamping during pan/zoom, and `AREA_PIN_*` rendering remains manual on hardware.
+

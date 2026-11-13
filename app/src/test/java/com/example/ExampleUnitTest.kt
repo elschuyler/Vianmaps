@@ -17,11 +17,22 @@ import com.example.data.tile.TileStorageManager
 import com.example.map.acquisition.VisibleTileCoordinator
 import com.example.map.source.MapSourceRepository
 import com.example.network.AppNetworkPolicy
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import android.app.Application
 import android.database.sqlite.SQLiteDatabase
 import androidx.room.Room
+import com.example.data.area.AreaDataProvenance
+import com.example.data.area.AreaDetailsRepository
+import com.example.data.area.AreaLocationIdentity
+import com.example.data.area.AreaNearbyItem
+import com.example.data.area.AreaRemoteLookupGateway
+import com.example.data.area.AreaWikiInfo
+import com.example.data.area.HttpAreaRemoteLookupGateway
+import com.example.data.area.RemoteAreaEnrichmentResult
+import com.example.data.area.SavedAreaNearbyCodec
 import com.example.data.db.RouteWaypointEntity
+import com.example.data.db.SavedAreaEntity
 import com.example.data.db.SavedRouteEntity
 import com.example.data.db.UserPlaceEntity
 import com.example.data.places.CreatePlaceOutcome
@@ -32,6 +43,11 @@ import com.example.data.places.RouteWaypointDraft
 import com.example.data.storage.StorageCalculationManager
 import com.example.ui.screens.ActiveModal
 import com.example.ui.screens.MapViewModel
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Protocol
+import okhttp3.Response
+import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -46,6 +62,7 @@ import org.maplibre.android.geometry.VisibleRegion
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.io.File
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Complete Local JVM Unit Test Suite for Vian Maps Phase 3.1 & 3.2.
@@ -1647,9 +1664,9 @@ class ExampleUnitTest {
         )
         sqliteDb.close()
 
-        // 2. Open with Room + MIGRATION_1_2 (schema validation runs automatically)
+        // 2. Open with Room + MIGRATION_1_2 + MIGRATION_2_3 (v1 -> v3 schema validation runs automatically)
         val migratedDb = Room.databaseBuilder(context, AppDatabase::class.java, dbName)
-            .addMigrations(AppDatabase.MIGRATION_1_2)
+            .addMigrations(AppDatabase.MIGRATION_1_2, AppDatabase.MIGRATION_2_3)
             .allowMainThreadQueries()
             .build()
 
@@ -1660,7 +1677,7 @@ class ExampleUnitTest {
         val preservedTile = migratedDb.retainedTileDao().getTile("openfreemap", "OSM_VECTOR", 14, 9687, 6199)
         assertNotNull(preservedTile)
 
-        // Assert new v2 user_places & saved_routes tables operate cleanly
+        // Assert v2 user_places & saved_routes and v3 saved_areas tables operate cleanly
         val newPlace = UserPlaceEntity(
             id = "place_mig_1",
             name = "Migrated Spot",
@@ -1692,6 +1709,16 @@ class ExampleUnitTest {
             )
         )
         assertEquals(1, migratedDb.savedRouteDao().getRouteCount())
+
+        migratedDb.savedAreaDao().upsertSavedArea(
+            SavedAreaEntity(
+                id = "area_mig_1",
+                name = "Migrated Area",
+                latitude = 39.92,
+                longitude = 32.85
+            )
+        )
+        assertEquals(1, migratedDb.savedAreaDao().getSavedAreaCount())
 
         migratedDb.close()
         dbFile.delete()
@@ -1881,5 +1908,588 @@ class ExampleUnitTest {
 
         db.savedRouteDao().clearAllRoutes()
         db.userPlaceDao().clearAllPlaces()
+    }
+
+    // =========================================================================
+    // Phase 4.2 Tests: Area Details, HTTP Lookups, Saved Areas, Migrations & Context Menu
+    // =========================================================================
+
+    @Test
+    fun test53_verifyAreaTapPriorityAndLongPressSuppression() {
+        val controller = com.example.map.engine.MapEngineController(
+            context = context,
+            initialLat = 39.92,
+            initialLng = 32.85,
+            initialZoom = 14.0,
+            initialBearing = 0.0,
+            onCameraMoved = { _, _, _, _ -> }
+        )
+
+        var emptyTapCount = 0
+        var placemarkTapId: String? = null
+        var routeTapId: String? = null
+        var poiTapCount = 0
+        var longPressCount = 0
+
+        controller.onEmptyMapSingleTap = { _, _ -> emptyTapCount++ }
+        controller.onPlacemarkTapped = { id -> placemarkTapId = id }
+        controller.onRouteTapped = { id -> routeTapId = id }
+        controller.onHighlightedPoiTapped = { poiTapCount++ }
+        controller.onMapLongPress = { _, _ -> longPressCount++ }
+
+        // 1. Mode interception (RouteDraft / PickPlacemarkLocation) wins over everything
+        controller.onMapTap = { _, _ -> true }
+        controller.dispatchMapTap(39.92, 32.85, hitPlacemarkId = "p1", nowMs = 5000L)
+        assertEquals(0, emptyTapCount)
+        assertNull(placemarkTapId)
+
+        controller.onMapTap = { _, _ -> false }
+
+        // 2. Placemark > Route > Highlighted POI > Empty Map Single Tap
+        controller.dispatchMapTap(39.92, 32.85, hitPlacemarkId = "place_a", hitRouteId = "route_a", hitHighlightedPoi = true, nowMs = 6000L)
+        assertEquals("place_a", placemarkTapId)
+        assertEquals(0, emptyTapCount)
+
+        controller.dispatchMapTap(39.92, 32.85, hitRouteId = "route_b", hitHighlightedPoi = true, nowMs = 7000L)
+        assertEquals("route_b", routeTapId)
+        assertEquals(0, emptyTapCount)
+
+        controller.dispatchMapTap(39.92, 32.85, hitHighlightedPoi = true, nowMs = 8000L)
+        assertEquals(1, poiTapCount)
+        assertEquals(0, emptyTapCount)
+
+        // 3. Empty map single tap triggers Area Details
+        controller.dispatchMapTap(39.92, 32.85, nowMs = 9000L)
+        assertEquals(1, emptyTapCount)
+
+        // 4. Long press suppresses an immediate follow-up single tap within 350 ms
+        controller.dispatchMapLongPress(39.93, 32.86, nowMs = 10_000L)
+        assertEquals(1, longPressCount)
+        controller.dispatchMapTap(39.93, 32.86, nowMs = 10_150L)
+        assertEquals(1, emptyTapCount)
+
+        // After suppression window passes, single tap triggers normally again
+        controller.dispatchMapTap(39.93, 32.86, nowMs = 10_500L)
+        assertEquals(2, emptyTapCount)
+    }
+
+    @Test
+    fun test54_verifyAreaAdaptiveRadiusAndOfflineSnapshotOnly(): Unit = runBlocking {
+        val db = AppDatabase.getInstance(context)
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            db.clearAllTables()
+        }
+
+        // Dense cluster: 4 POIs within ~120 m of (39.9200, 32.8500) -> stays at 250 m
+        val densePois = listOf(
+            OsmPoiRecord(91001L, "Central Cafe", "amenity", "cafe", 39.9204, 32.8502, 14, 1, 1),
+            OsmPoiRecord(91002L, "Metro Bookshop", "shop", "books", 39.9207, 32.8505, 14, 1, 1),
+            OsmPoiRecord(91003L, "Corner Pharmacy", "amenity", "pharmacy", 39.9195, 32.8495, 14, 1, 1),
+            OsmPoiRecord(91004L, "Oak Square", "leisure", "park", 39.9192, 32.8508, 14, 1, 1)
+        )
+        db.osmPoiDao().insertPois(densePois)
+
+        // Sparse area: 1 POI at ~600 m away from (41.0000, 29.0000) -> expands to 1000 m
+        db.osmPoiDao().insertPois(
+            listOf(OsmPoiRecord(91005L, "Hilltop Chapel", "amenity", "place_of_worship", 41.0054, 29.0000, 14, 2, 2))
+        )
+
+        var gatewayCalls = 0
+        val countingGateway = object : AreaRemoteLookupGateway {
+            override suspend fun lookupAreaOnline(
+                latitude: Double,
+                longitude: Double,
+                radiusMeters: Int,
+                localHintNames: List<String>
+            ): RemoteAreaEnrichmentResult {
+                gatewayCalls++
+                return RemoteAreaEnrichmentResult()
+            }
+        }
+        val repo = AreaDetailsRepository(context, countingGateway)
+
+        val denseLocal = repo.queryLocalSnapshot(39.9200, 32.8500)
+        assertEquals(AreaDetailsRepository.DENSE_RADIUS_METERS, denseLocal.radiusUsedMeters)
+        assertEquals(4, denseLocal.nearbyPlaces.size)
+        assertEquals(AreaDataProvenance.LOCAL_ONLY, denseLocal.provenance)
+        assertTrue(denseLocal.nearbyPlaces[0].distanceMeters <= denseLocal.nearbyPlaces[1].distanceMeters)
+
+        val sparseLocal = repo.queryLocalSnapshot(41.0000, 29.0000)
+        assertEquals(AreaDetailsRepository.SPARSE_RADIUS_METERS, sparseLocal.radiusUsedMeters)
+        assertEquals(1, sparseLocal.nearbyPlaces.size)
+        assertEquals("Hilltop Chapel", sparseLocal.nearbyPlaces[0].name)
+
+        // Offline enrichment returns offline flag cleanly and hits 0 gateway calls
+        val offlineResult = repo.enrichWithOnlineData(sparseLocal, isOnlineAllowed = false)
+        assertTrue(offlineResult.isOffline)
+        assertEquals(0, gatewayCalls)
+        assertEquals(1, offlineResult.nearbyPlaces.size)
+
+        db.osmPoiDao().clearAllPois()
+    }
+
+    @Test
+    fun test55_verifyHttpGatewayNominatimWikiDisambiguationAndPartialError(): Unit = runBlocking {
+        // Case A: Nominatim + matching Wikipedia summary (verified User-Agent and CC BY-SA attribution)
+        val seenUserAgents = mutableListOf<String?>()
+        val happyClient = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                val req = chain.request()
+                seenUserAgents.add(req.header("User-Agent"))
+                val url = req.url.toString()
+                val json = when {
+                    url.contains("/reverse") -> """
+                        {
+                          "name": "Galata Tower",
+                          "category": "tourism",
+                          "type": "attraction",
+                          "display_name": "Galata Tower, Bereketzade, Beyoğlu, Istanbul, Turkey",
+                          "address": {
+                            "road": "Büyük Hendek Caddesi",
+                            "neighbourhood": "Bereketzade",
+                            "city": "Istanbul",
+                            "state": "Marmara",
+                            "country": "Turkey"
+                          },
+                          "extratags": {
+                            "wikipedia": "en:Galata Tower",
+                            "wikidata": "Q217122"
+                          }
+                        }
+                    """.trimIndent()
+                    url.contains("list=geosearch") -> """
+                        {
+                          "query": {
+                            "geosearch": [
+                              {"pageid": 101, "title": "Galata Tower", "lat": 41.0256, "lon": 28.9741, "dist": 12.0},
+                              {"pageid": 102, "title": "Neve Shalom Synagogue", "lat": 41.0265, "lon": 28.9725, "dist": 180.0}
+                            ]
+                          }
+                        }
+                    """.trimIndent()
+                    url.contains("/page/summary/") -> """
+                        {
+                          "type": "standard",
+                          "title": "Galata Tower",
+                          "extract": "Galata Tower is a medieval stone tower in the Galata quarter of Istanbul, Turkey.",
+                          "wikibase_item": "Q217122",
+                          "content_urls": { "mobile": { "page": "https://en.m.wikipedia.org/wiki/Galata_Tower" } }
+                        }
+                    """.trimIndent()
+                    else -> "{}"
+                }
+                Response.Builder()
+                    .request(req)
+                    .protocol(Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body(json.toResponseBody("application/json".toMediaType()))
+                    .build()
+            }
+            .build()
+
+        val happyGateway = HttpAreaRemoteLookupGateway(
+            client = happyClient,
+            minNominatimIntervalMs = 0L
+        )
+        val happyRes = happyGateway.lookupAreaOnline(41.0256, 28.9741, 250, emptyList())
+        assertTrue(seenUserAgents.all { it?.contains("VianMaps") == true })
+        assertEquals("Galata Tower", happyRes.identity?.primaryName)
+        assertEquals("Istanbul", happyRes.identity?.locality)
+        assertEquals("Turkey", happyRes.identity?.country)
+        assertNotNull(happyRes.wikiInfo)
+        assertEquals("Galata Tower", happyRes.wikiInfo!!.title)
+        assertEquals("Q217122", happyRes.wikiInfo!!.wikidataId)
+        assertEquals("https://en.m.wikipedia.org/wiki/Galata_Tower", happyRes.wikiInfo!!.url)
+        assertTrue(happyRes.sourceAttributions.any { it.contains("OpenStreetMap") })
+        assertTrue(happyRes.sourceAttributions.any { it.contains("Wikipedia") })
+
+        // Case B: Ambiguous/distant Wikipedia + Wikipedia API 500 error -> Nominatim succeeds cleanly with partialError
+        val partialClient = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                val req = chain.request()
+                val url = req.url.toString()
+                if (url.contains("/reverse")) {
+                    val revJson = """
+                        {
+                          "name": "Unnamed Meadow",
+                          "category": "natural",
+                          "type": "grassland",
+                          "address": { "town": "Bolu", "country": "Turkey" }
+                        }
+                    """.trimIndent()
+                    Response.Builder()
+                        .request(req)
+                        .protocol(Protocol.HTTP_1_1)
+                        .code(200)
+                        .message("OK")
+                        .body(revJson.toResponseBody("application/json".toMediaType()))
+                        .build()
+                } else {
+                    Response.Builder()
+                        .request(req)
+                        .protocol(Protocol.HTTP_1_1)
+                        .code(503)
+                        .message("Service Unavailable")
+                        .body("Service Unavailable".toResponseBody("text/plain".toMediaType()))
+                        .build()
+                }
+            }
+            .build()
+
+        val partialGateway = HttpAreaRemoteLookupGateway(client = partialClient, minNominatimIntervalMs = 0L)
+        val partialRes = partialGateway.lookupAreaOnline(40.73, 31.60, 1000, emptyList())
+        assertEquals("Unnamed Meadow", partialRes.identity?.primaryName)
+        assertNull(partialRes.wikiInfo)
+        assertNull(partialRes.fatalError)
+        assertTrue(partialRes.partialErrors.isNotEmpty())
+        assertTrue(partialRes.wikiStatusNote != null)
+    }
+
+    @Test
+    fun test56_verifyAreaRequestDeduplicationAndCancellation(): Unit = runBlocking {
+        val db = AppDatabase.getInstance(context)
+        db.savedAreaDao().clearAllSavedAreas()
+        db.osmPoiDao().clearAllPois()
+
+        val remoteCalls = AtomicInteger(0)
+        val slowGateway = object : AreaRemoteLookupGateway {
+            override suspend fun lookupAreaOnline(
+                latitude: Double,
+                longitude: Double,
+                radiusMeters: Int,
+                localHintNames: List<String>
+            ): RemoteAreaEnrichmentResult {
+                remoteCalls.incrementAndGet()
+                kotlinx.coroutines.delay(150L)
+                return RemoteAreaEnrichmentResult(
+                    identity = AreaLocationIdentity(primaryName = "Dedup Square", country = "TR"),
+                    sourceAttributions = listOf("© OpenStreetMap contributors")
+                )
+            }
+        }
+        val repo = AreaDetailsRepository(context, slowGateway)
+        val baseline = repo.queryLocalSnapshot(39.9255, 32.8369)
+
+        // Two concurrent calls for the same coordinate bucket deduplicate into 1 network request
+        val deferredA = async {
+            repo.enrichWithOnlineData(baseline, isOnlineAllowed = true)
+        }
+        val deferredB = async {
+            repo.enrichWithOnlineData(baseline, isOnlineAllowed = true)
+        }
+        val resA = deferredA.await()
+        val resB = deferredB.await()
+        assertEquals(1, remoteCalls.get())
+        assertEquals("Dedup Square", resA.locationIdentity?.primaryName)
+        assertEquals("Dedup Square", resB.locationIdentity?.primaryName)
+
+        // Subsequent non-forced call uses short-term memory cache cleanly (still 1 call total)
+        val cached = repo.enrichWithOnlineData(baseline, isOnlineAllowed = true)
+        assertEquals(1, remoteCalls.get())
+        assertEquals("Dedup Square", cached.locationIdentity?.primaryName)
+    }
+
+    @Test
+    fun test57_verifySavedAreaPersistenceSubsetNearbyEditRefreshDelete(): Unit = runBlocking {
+        val db = AppDatabase.getInstance(context)
+        db.savedAreaDao().clearAllSavedAreas()
+        db.osmPoiDao().clearAllPois()
+
+        var refreshCount = 0
+        val fakeGateway = object : AreaRemoteLookupGateway {
+            override suspend fun lookupAreaOnline(
+                latitude: Double,
+                longitude: Double,
+                radiusMeters: Int,
+                localHintNames: List<String>
+            ): RemoteAreaEnrichmentResult {
+                refreshCount++
+                return RemoteAreaEnrichmentResult(
+                    identity = AreaLocationIdentity(
+                        primaryName = "Harbor Watch v$refreshCount",
+                        addressLabel = "Pier Rd 10",
+                        locality = "Karaköy",
+                        administrativeRegion = "Istanbul",
+                        country = "Turkey"
+                    ),
+                    wikiInfo = AreaWikiInfo(
+                        title = "Karaköy",
+                        summary = "Historic waterfront district.",
+                        url = "https://en.wikipedia.org/wiki/Karaköy",
+                        wikidataId = "Q1729402"
+                    ),
+                    sourceAttributions = listOf("© OpenStreetMap contributors", "© Wikipedia contributors (CC BY-SA 4.0)")
+                )
+            }
+        }
+
+        val repo = AreaDetailsRepository(context, fakeGateway)
+        val nearbyAll = listOf(
+            AreaNearbyItem("poi_1", "Keep Bakery", "bakery", 35.0, 41.02, 28.97, "Local OSM"),
+            AreaNearbyItem("poi_2", "Skip Kiosk", "kiosk", 85.0, 41.021, 28.971, "Local OSM")
+        )
+        val liveResult = repo.enrichWithOnlineData(
+            repo.queryLocalSnapshot(41.0200, 28.9700).copy(nearbyPlaces = nearbyAll),
+            isOnlineAllowed = true
+        )
+
+        // Save selecting ONLY poi_1 + custom notes
+        val saved = repo.saveAreaSnapshot(
+            result = liveResult,
+            selectedNearbyIds = setOf("poi_1"),
+            userNotes = "Morning light view"
+        ).getOrThrow()
+
+        assertEquals("Harbor Watch v1", saved.name)
+        assertEquals(1, saved.retainedNearbyCount)
+        assertEquals("Morning light view", saved.userNotes)
+        val decodedNearby = SavedAreaNearbyCodec.decode(saved.nearbySummaryJson)
+        assertEquals(1, decodedNearby.size)
+        assertEquals("Keep Bakery", decodedNearby[0].name)
+
+        // Offline reload reads persisted snapshot without calling gateway
+        val callsBeforeOfflineLoad = refreshCount
+        val offlineLoaded = repo.queryLocalSnapshot(41.0200, 28.9700)
+        assertTrue(offlineLoaded.isSavedSnapshot)
+        assertEquals(AreaDataProvenance.SAVED_SNAPSHOT, offlineLoaded.provenance)
+        assertEquals("Harbor Watch v1", offlineLoaded.locationIdentity?.primaryName)
+        assertEquals("Karaköy", offlineLoaded.wikiInfo?.title)
+        assertEquals(callsBeforeOfflineLoad, refreshCount)
+
+        // Edit metadata & tags
+        val edited = repo.updateSavedAreaMetadata(
+            areaId = saved.id,
+            name = "My Harbor Spot",
+            category = "waterfront",
+            addressLabel = "Pier Rd 10, Karaköy",
+            userNotes = "Updated note",
+            tagsText = "harbor, scenic, harbor"
+        ).getOrThrow()
+        assertEquals("My Harbor Spot", edited.name)
+        assertEquals("harbor, scenic", edited.tagsCsv)
+
+        // Explicit online refresh updates details while keeping notes
+        val refreshed = repo.refreshSavedAreaOnline(saved.id, isOnlineAllowed = true).getOrThrow()
+        assertEquals("Harbor Watch v2", refreshed.name)
+        assertEquals("Updated note", refreshed.userNotes)
+        assertEquals(2, refreshCount)
+
+        // Delete removes saved area record cleanly
+        assertTrue(repo.deleteSavedArea(saved.id))
+        assertNull(repo.getSavedAreaById(saved.id))
+    }
+
+    @Test
+    fun test58_verifyDatabaseMigrationV2ToV3AndTileClearPreservesSavedAreas(): Unit = runBlocking {
+        // Part A: Explicit SQLite v2 -> v3 migration preserves existing v2 placemarks & routes
+        val dbName = "test_migration_v2_v3_${System.currentTimeMillis()}.db"
+        val dbFile = context.getDatabasePath(dbName)
+        dbFile.parentFile?.mkdirs()
+        if (dbFile.exists()) dbFile.delete()
+
+        val sqliteV2 = SQLiteDatabase.openOrCreateDatabase(dbFile, null)
+        sqliteV2.version = 2
+        sqliteV2.execSQL("CREATE TABLE IF NOT EXISTS `retained_tiles` (`providerId` TEXT NOT NULL, `category` TEXT NOT NULL, `z` INTEGER NOT NULL, `x` INTEGER NOT NULL, `y` INTEGER NOT NULL, `filePath` TEXT NOT NULL, `byteSize` INTEGER NOT NULL, `checksum` TEXT NOT NULL, `fetchTimestamp` INTEGER NOT NULL, `etag` TEXT, `sourceUrl` TEXT NOT NULL, `attribution` TEXT NOT NULL, `retentionPermission` TEXT NOT NULL, `integrityStatus` TEXT NOT NULL, PRIMARY KEY(`providerId`, `category`, `z`, `x`, `y`))")
+        sqliteV2.execSQL("CREATE TABLE IF NOT EXISTS `osm_pois` (`osmId` INTEGER NOT NULL, `name` TEXT NOT NULL, `category` TEXT NOT NULL, `subCategory` TEXT, `latitude` REAL NOT NULL, `longitude` REAL NOT NULL, `sourceTileZ` INTEGER NOT NULL, `sourceTileX` INTEGER NOT NULL, `sourceTileY` INTEGER NOT NULL, `tagsJson` TEXT NOT NULL, `layerName` TEXT NOT NULL, `fetchTimestamp` INTEGER NOT NULL, PRIMARY KEY(`osmId`))")
+        sqliteV2.execSQL("CREATE TABLE IF NOT EXISTS `osm_buildings` (`osmId` INTEGER NOT NULL, `name` TEXT, `buildingType` TEXT NOT NULL, `heightMeters` REAL NOT NULL, `minHeightMeters` REAL NOT NULL, `sourceTileZ` INTEGER NOT NULL, `sourceTileX` INTEGER NOT NULL, `sourceTileY` INTEGER NOT NULL, `centroidLat` REAL NOT NULL, `centroidLng` REAL NOT NULL, `geometryJson` TEXT NOT NULL, PRIMARY KEY(`osmId`))")
+        sqliteV2.execSQL("CREATE TABLE IF NOT EXISTS `osm_regions` (`osmId` INTEGER NOT NULL, `name` TEXT NOT NULL, `adminLevel` INTEGER NOT NULL, `boundaryType` TEXT NOT NULL, `sourceTileZ` INTEGER NOT NULL, `sourceTileX` INTEGER NOT NULL, `sourceTileY` INTEGER NOT NULL, PRIMARY KEY(`osmId`))")
+        sqliteV2.execSQL("CREATE TABLE IF NOT EXISTS `osm_roads` (`osmId` INTEGER NOT NULL, `name` TEXT, `highwayClass` TEXT NOT NULL, `isOneway` INTEGER NOT NULL, `sourceTileZ` INTEGER NOT NULL, `sourceTileX` INTEGER NOT NULL, `sourceTileY` INTEGER NOT NULL, `geometryJson` TEXT NOT NULL, PRIMARY KEY(`osmId`))")
+        sqliteV2.execSQL("CREATE TABLE IF NOT EXISTS `routing_graph_tiles` (`level` INTEGER NOT NULL, `tileIndex` INTEGER NOT NULL, `status` TEXT NOT NULL, `filePath` TEXT, `byteSize` INTEGER NOT NULL, `lastChecked` INTEGER NOT NULL, PRIMARY KEY(`level`, `tileIndex`))")
+        sqliteV2.execSQL("CREATE TABLE IF NOT EXISTS `user_places` (`id` TEXT NOT NULL, `name` TEXT NOT NULL, `latitude` REAL NOT NULL, `longitude` REAL NOT NULL, `description` TEXT NOT NULL, `addressLabel` TEXT, `category` TEXT NOT NULL, `tagsCsv` TEXT NOT NULL, `isPlacemark` INTEGER NOT NULL, `linkedModuleRef` TEXT, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`id`))")
+        sqliteV2.execSQL("CREATE INDEX IF NOT EXISTS `index_user_places_isPlacemark` ON `user_places` (`isPlacemark`)")
+        sqliteV2.execSQL("CREATE INDEX IF NOT EXISTS `index_user_places_updatedAt` ON `user_places` (`updatedAt`)")
+        sqliteV2.execSQL("CREATE TABLE IF NOT EXISTS `saved_routes` (`id` TEXT NOT NULL, `name` TEXT NOT NULL, `description` TEXT NOT NULL, `geometryJson` TEXT NOT NULL, `pointCount` INTEGER NOT NULL, `totalDistanceMeters` REAL NOT NULL, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`id`))")
+        sqliteV2.execSQL("CREATE INDEX IF NOT EXISTS `index_saved_routes_updatedAt` ON `saved_routes` (`updatedAt`)")
+        sqliteV2.execSQL("CREATE TABLE IF NOT EXISTS `route_waypoints` (`id` TEXT NOT NULL, `routeId` TEXT NOT NULL, `placeId` TEXT, `orderIndex` INTEGER NOT NULL, `name` TEXT NOT NULL, `latitude` REAL NOT NULL, `longitude` REAL NOT NULL, `notes` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, PRIMARY KEY(`id`), FOREIGN KEY(`routeId`) REFERENCES `saved_routes`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE, FOREIGN KEY(`placeId`) REFERENCES `user_places`(`id`) ON UPDATE NO ACTION ON DELETE SET NULL)")
+        sqliteV2.execSQL("CREATE INDEX IF NOT EXISTS `index_route_waypoints_routeId` ON `route_waypoints` (`routeId`)")
+        sqliteV2.execSQL("CREATE INDEX IF NOT EXISTS `index_route_waypoints_placeId` ON `route_waypoints` (`placeId`)")
+
+        sqliteV2.execSQL("INSERT INTO `user_places` (`id`, `name`, `latitude`, `longitude`, `description`, `addressLabel`, `category`, `tagsCsv`, `isPlacemark`, `linkedModuleRef`, `createdAt`, `updatedAt`) VALUES ('v2_place', 'Old Lookout', 39.9, 32.8, 'Preserved note', 'Hill', 'viewpoint', 'v2', 1, NULL, 1000, 1000)")
+        sqliteV2.close()
+
+        val migratedV3 = Room.databaseBuilder(context, AppDatabase::class.java, dbName)
+            .addMigrations(AppDatabase.MIGRATION_1_2, AppDatabase.MIGRATION_2_3)
+            .allowMainThreadQueries()
+            .build()
+
+        val preservedPlace = migratedV3.userPlaceDao().getPlaceById("v2_place")
+        assertNotNull(preservedPlace)
+        assertEquals("Old Lookout", preservedPlace!!.name)
+        migratedV3.savedAreaDao().upsertSavedArea(
+            SavedAreaEntity(id = "v3_area", name = "Post-Migration Area", latitude = 39.91, longitude = 32.82)
+        )
+        assertEquals(1, migratedV3.savedAreaDao().getSavedAreaCount())
+        migratedV3.close()
+        dbFile.delete()
+
+        // Part B: Clearing tile caches must NEVER delete saved_areas
+        val db = AppDatabase.getInstance(context)
+        db.savedAreaDao().clearAllSavedAreas()
+        TileStorageManager(context).saveTileData(
+            providerId = "openfreemap",
+            category = TileCategory.OSM_VECTOR,
+            z = 14,
+            x = 123,
+            y = 456,
+            data = "VECTOR_BYTES".toByteArray(),
+            metadata = TileMetadata(providerId = "openfreemap", retentionPermission = "PERMITTED")
+        )
+        db.savedAreaDao().upsertSavedArea(
+            SavedAreaEntity(id = "keep_area_1", name = "Protected Area", latitude = 40.0, longitude = 29.0)
+        )
+        val cleared = StorageCalculationManager.clearProviderTiles(context, db, "openfreemap")
+        assertTrue(cleared.isSuccess)
+        assertNotNull(db.savedAreaDao().getSavedAreaById("keep_area_1"))
+        val report = StorageCalculationManager.calculateStorage(context, db)
+        assertEquals(1, report.featureStorage.savedAreaCount)
+        db.savedAreaDao().clearAllSavedAreas()
+    }
+
+    @Test
+    fun test59_verifyMapViewModelSingleTapAreaDetailsAsyncLifecycle(): Unit = runBlocking {
+        val db = AppDatabase.getInstance(context)
+        db.savedAreaDao().clearAllSavedAreas()
+        db.osmPoiDao().clearAllPois()
+        db.osmPoiDao().insertPois(
+            listOf(OsmPoiRecord(92001L, "Local Museum", "tourism", "museum", 39.9302, 32.8602, 14, 1, 1))
+        )
+
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        val viewModel = MapViewModel(app)
+        AppNetworkPolicy.setInternetEnabled(true)
+
+        val fakeGateway = object : AreaRemoteLookupGateway {
+            override suspend fun lookupAreaOnline(
+                latitude: Double,
+                longitude: Double,
+                radiusMeters: Int,
+                localHintNames: List<String>
+            ): RemoteAreaEnrichmentResult {
+                return RemoteAreaEnrichmentResult(
+                    identity = AreaLocationIdentity(
+                        primaryName = "Ulus Square",
+                        locality = "Ankara",
+                        country = "Turkey"
+                    ),
+                    wikiInfo = AreaWikiInfo(
+                        title = "Ulus Square",
+                        summary = "Central square in Ankara.",
+                        url = "https://en.wikipedia.org/wiki/Ulus_Square"
+                    ),
+                    sourceAttributions = listOf("© OpenStreetMap contributors", "© Wikipedia contributors (CC BY-SA 4.0)")
+                )
+            }
+        }
+        viewModel.configureAreaTesting(gateway = fakeGateway, onlineOverride = true)
+
+        val controller = com.example.map.engine.MapEngineController(
+            context = context,
+            initialLat = 39.93,
+            initialLng = 32.86,
+            initialZoom = 15.0,
+            initialBearing = 0.0,
+            onCameraMoved = { _, _, _, _ -> }
+        )
+
+        viewModel.onEmptyMapSingleTap(39.9300, 32.8600, controller)
+        // Immediate opening sets coordinates and area pin before async enrichment completes
+        assertNotNull(viewModel.uiState.value.areaDetailsState)
+        assertEquals(39.9300, controller.currentAreaPin!!.latitude, 1e-6)
+
+        val deadline = System.currentTimeMillis() + 3000L
+        while ((viewModel.uiState.value.areaDetailsState?.details?.isLoadingOnline != false ||
+                viewModel.uiState.value.areaDetailsState?.details?.locationIdentity?.primaryName != "Ulus Square") &&
+            System.currentTimeMillis() < deadline
+        ) {
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            kotlinx.coroutines.delay(15L)
+        }
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+
+        val finalState = viewModel.uiState.value.areaDetailsState!!
+        assertEquals("Ulus Square", finalState.details.locationIdentity?.primaryName)
+        assertEquals("Ulus Square", finalState.details.wikiInfo?.title)
+        assertTrue(finalState.details.nearbyPlaces.any { it.name == "Local Museum" })
+        assertEquals(AreaDataProvenance.HYBRID_ONLINE_AND_LOCAL, finalState.details.provenance)
+
+        // Dismiss clears area state and pin cleanly
+        viewModel.dismissAreaDetails(controller)
+        assertNull(viewModel.uiState.value.areaDetailsState)
+        assertNull(controller.currentAreaPin)
+
+        db.osmPoiDao().clearAllPois()
+    }
+
+    @Test
+    fun test60_verifyMapViewModelLongPressContextMenuMatchesAndActions(): Unit = runBlocking {
+        val db = AppDatabase.getInstance(context)
+        db.savedAreaDao().clearAllSavedAreas()
+        db.userPlaceDao().clearAllPlaces()
+        db.savedRouteDao().clearAllRoutes()
+
+        val existingArea = SavedAreaEntity(
+            id = "ctx_area_1",
+            name = "Saved Plaza",
+            latitude = 39.9400,
+            longitude = 32.8700,
+            addressLabel = "Plaza Way"
+        )
+        db.savedAreaDao().upsertSavedArea(existingArea)
+
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        val viewModel = MapViewModel(app)
+        val controller = com.example.map.engine.MapEngineController(
+            context = context,
+            initialLat = 39.90,
+            initialLng = 32.80,
+            initialZoom = 14.0,
+            initialBearing = 0.0,
+            onCameraMoved = { _, _, _, _ -> }
+        )
+
+        // 1. Long press detects matching existing saved area
+        viewModel.onMapLongPressed(39.9401, 32.8701, controller)
+        val ctxDeadline = System.currentTimeMillis() + 3000L
+        while (viewModel.uiState.value.mapContextMenuState?.isResolvingMatches != false &&
+            System.currentTimeMillis() < ctxDeadline
+        ) {
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            kotlinx.coroutines.delay(15L)
+        }
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+
+        val ctx = viewModel.uiState.value.mapContextMenuState!!
+        assertEquals("ctx_area_1", ctx.matches.savedArea?.id)
+
+        // 2. Context action: Add Placemark prefills name & coordinate cleanly
+        viewModel.contextAddPlacemarkHere(controller)
+        assertNull(viewModel.uiState.value.mapContextMenuState)
+        val editor = viewModel.uiState.value.placemarkEditorState!!
+        assertEquals("Saved Plaza", editor.name)
+        assertEquals(39.9401, editor.latitude, 1e-6)
+        viewModel.dismissPlacemarkEditor()
+
+        // 3. Context action: Route from this point initiates draft with Start waypoint
+        viewModel.onMapLongPressed(39.9401, 32.8701, controller)
+        viewModel.contextRouteFromHere(controller)
+        assertTrue(viewModel.uiState.value.routeDraft.isActive)
+        assertEquals("Start", viewModel.uiState.value.routeDraft.waypointNamesByPointIndex[0])
+        viewModel.cancelRouteDraft(controller)
+
+        // 4. Planned action shows honest notice without creating any fake database rows
+        viewModel.onMapLongPressed(39.9401, 32.8701, controller)
+        viewModel.contextShowPlannedAction(
+            title = "Create Note Here",
+            featureGroup = "Notes",
+            summary = "Planned note summary",
+            plannedBehavior = "Planned behavior",
+            controller = controller
+        )
+        assertNotNull(viewModel.uiState.value.plannedActionNotice)
+        assertEquals("Create Note Here", viewModel.uiState.value.plannedActionNotice?.title)
+        assertEquals(0, db.userPlaceDao().getPlacemarkCount())
+
+        db.savedAreaDao().clearAllSavedAreas()
     }
 }
