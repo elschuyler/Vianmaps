@@ -66,6 +66,8 @@ data class AreaDetailsResult(
     val isOffline: Boolean = false,
     val partialWarning: String? = null,
     val errorMessage: String? = null,
+    val activeReverseProviderId: String = ReverseGeocodingProviderConfig.PUBLIC_NOMINATIM_ID,
+    val reverseGeocoderNote: String? = null,
     val sourceAttribution: String = "Local OSM Database",
     val userNotes: String = ""
 )

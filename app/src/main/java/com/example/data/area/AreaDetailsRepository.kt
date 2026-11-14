@@ -39,7 +39,8 @@ import java.util.concurrent.ConcurrentHashMap
  */
 class AreaDetailsRepository(
     context: Context,
-    private val remoteGateway: AreaRemoteLookupGateway = HttpAreaRemoteLookupGateway()
+    private val remoteGateway: AreaRemoteLookupGateway = HttpAreaRemoteLookupGateway(),
+    private val clockMs: () -> Long = { System.currentTimeMillis() }
 ) {
     private val db = AppDatabase.getInstance(context)
     private val savedAreaDao = db.savedAreaDao()
@@ -54,6 +55,7 @@ class AreaDetailsRepository(
 
     private data class CachedRemoteEntry(
         val result: RemoteAreaEnrichmentResult,
+        val isNoResult: Boolean,
         val cachedAtMs: Long
     )
 
@@ -69,7 +71,8 @@ class AreaDetailsRepository(
         const val SPARSE_RADIUS_METERS = 1000
         private const val DENSE_THRESHOLD_COUNT = 3
         private const val MAX_NEARBY_RESULTS = 12
-        private const val CACHE_TTL_MS = 10 * 60 * 1000L
+        const val SUCCESS_CACHE_TTL_MS = 10 * 60 * 1000L // 10 minutes for successful enrichments
+        const val NO_RESULT_CACHE_TTL_MS = 2 * 60 * 1000L // 2 minutes for verified empty/no-result responses
         private const val NEARBY_SAVED_AREA_MATCH_METERS = 75.0
         private const val NEARBY_PLACEMARK_MATCH_METERS = 40.0
         private const val NEARBY_ROUTE_MATCH_METERS = 45.0
@@ -225,11 +228,23 @@ class AreaDetailsRepository(
             )
         }
 
-        val cacheKey = buildCacheKey(lat, lng, localBaseline.radiusUsedMeters)
-        val now = System.currentTimeMillis()
+        val providerKey = remoteGateway.activeProviderCacheKey()
+        val cacheKey = buildCacheKey(providerKey, lat, lng, localBaseline.radiusUsedMeters)
+        val now = clockMs()
         if (!forceRefresh) {
             val cached = synchronized(remoteCache) {
-                remoteCache[cacheKey]?.takeIf { (now - it.cachedAtMs) <= CACHE_TTL_MS }
+                val entry = remoteCache[cacheKey]
+                if (entry != null) {
+                    val ttlMs = if (entry.isNoResult) NO_RESULT_CACHE_TTL_MS else SUCCESS_CACHE_TTL_MS
+                    if ((now - entry.cachedAtMs) <= ttlMs) {
+                        entry
+                    } else {
+                        remoteCache.remove(cacheKey)
+                        null
+                    }
+                } else {
+                    null
+                }
             }
             if (cached != null) {
                 return mergeLocalAndRemote(localBaseline, cached.result, isRefresh = false)
@@ -268,9 +283,21 @@ class AreaDetailsRepository(
 
         return try {
             val remote = deferred.await()
-            if (remote.fatalError == null) {
+            val hasCacheableSuccess = !remote.hasTransientError &&
+                remote.fatalError == null &&
+                (remote.identity != null || remote.wikiInfo != null || remote.nearbyWikiPlaces.isNotEmpty())
+            val hasCacheableNoResult = !remote.hasTransientError &&
+                remote.fatalError == null &&
+                remote.isValidNoResult &&
+                !hasCacheableSuccess
+
+            if (hasCacheableSuccess || hasCacheableNoResult) {
                 synchronized(remoteCache) {
-                    remoteCache[cacheKey] = CachedRemoteEntry(remote, System.currentTimeMillis())
+                    remoteCache[cacheKey] = CachedRemoteEntry(
+                        result = remote,
+                        isNoResult = hasCacheableNoResult,
+                        cachedAtMs = clockMs()
+                    )
                 }
             }
             mergeLocalAndRemote(localBaseline, remote, isRefresh = forceRefresh)
@@ -374,13 +401,16 @@ class AreaDetailsRepository(
             .distinct()
             .joinToString(", ")
 
+        val now = clockMs()
         val updated = existing.copy(
             name = cleanName,
             category = category.trim().ifEmpty { "area" },
             addressLabel = addressLabel.trim(),
             userNotes = userNotes.trim(),
             tagsCsv = normalizedTags,
-            updatedAt = System.currentTimeMillis()
+            // Preserve existing.retrievedAt so data retrieval time stays distinct from user edit time.
+            retrievedAt = existing.retrievedAt,
+            updatedAt = now
         )
         savedAreaDao.upsertSavedArea(updated)
         Result.success(updated)
@@ -393,24 +423,92 @@ class AreaDetailsRepository(
         val existing = savedAreaDao.getSavedAreaById(areaId)
             ?: return@withContext Result.failure(IllegalArgumentException("Saved area not found."))
         if (!isOnlineAllowed) {
-            return@withContext Result.failure(IllegalStateException("Internet is disabled or offline. Cannot refresh snapshot."))
+            return@withContext Result.failure(IllegalStateException("Internet is disabled or offline. Existing saved snapshot preserved."))
         }
-        val localBaseline = queryLocalSnapshot(existing.latitude, existing.longitude)
-        val refreshed = enrichWithOnlineData(
-            localBaseline = localBaseline,
-            isOnlineAllowed = true,
-            forceRefresh = true
-        )
-        if (refreshed.errorMessage != null && refreshed.locationIdentity == null && refreshed.wikiInfo == null) {
-            return@withContext Result.failure(IllegalStateException(refreshed.errorMessage))
+
+        // Gather pure local OSM baseline without conflating saved snapshot identity as fresh remote data
+        val localOsm = queryLocalOsmFeatures(existing.latitude, existing.longitude)
+        val localHints = localOsm.nearbyItems.take(3).map { it.name }
+        val remote = try {
+            remoteGateway.lookupAreaOnline(
+                latitude = existing.latitude,
+                longitude = existing.longitude,
+                radiusMeters = localOsm.radiusUsedMeters,
+                localHintNames = localHints
+            )
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (e: Throwable) {
+            return@withContext Result.failure(
+                IllegalStateException("Refresh failed (${e.message ?: "Network error"}); existing snapshot preserved.")
+            )
         }
-        val allIds = refreshed.nearbyPlaces.map { it.id }.toSet()
-        saveAreaSnapshot(
-            result = refreshed.copy(savedAreaId = existing.id),
-            customName = refreshed.locationIdentity?.primaryName ?: existing.name,
-            selectedNearbyIds = allIds,
-            userNotes = existing.userNotes
+
+        val hasFreshRemoteData = remote.identity != null || remote.wikiInfo != null || remote.nearbyWikiPlaces.isNotEmpty()
+        if (remote.fatalError != null || !hasFreshRemoteData) {
+            val reason = remote.fatalError
+                ?: remote.partialErrors.firstOrNull()
+                ?: remote.reverseGeocoderStatusNote
+                ?: remote.wikiStatusNote
+                ?: "No fresh online data returned"
+            return@withContext Result.failure(IllegalStateException("$reason. Existing saved snapshot preserved."))
+        }
+        if (remote.hasTransientError && remote.identity == null && remote.wikiInfo == null) {
+            return@withContext Result.failure(
+                IllegalStateException("${remote.partialErrors.firstOrNull() ?: "Online refresh error"}. Existing saved snapshot preserved.")
+            )
+        }
+
+        val freshBaseline = AreaDetailsResult(
+            latitude = existing.latitude,
+            longitude = existing.longitude,
+            savedAreaId = existing.id,
+            isSavedSnapshot = false,
+            retrievedAt = clockMs(),
+            provenance = AreaDataProvenance.LOCAL_ONLY,
+            radiusUsedMeters = localOsm.radiusUsedMeters,
+            nearbyPlaces = localOsm.nearbyItems,
+            geographicDetails = localOsm.geographicDetails
         )
+        val refreshed = mergeLocalAndRemote(freshBaseline, remote, isRefresh = true)
+
+        val now = clockMs()
+        val resolvedName = remote.identity?.primaryName?.takeIf { it.isNotBlank() && it != "Selected Location" }
+            ?: existing.name
+        val mergedGeoDetails = (refreshed.geographicDetails +
+            existing.geographicDetails.lines().map { it.trim() }.filter { it.isNotEmpty() })
+            .distinct()
+            .joinToString("\n")
+        val existingNearby = SavedAreaNearbyCodec.decode(existing.nearbySummaryJson)
+        val mergedNearby = mergeNearbyItems(
+            refreshed.nearbyPlaces.filter { existingNearby.isEmpty() || existingNearby.any { ex -> ex.id == it.id } || it.sourceLabel == "Online Wikipedia" },
+            existingNearby
+        ).ifEmpty { existingNearby }
+
+        val updated = existing.copy(
+            name = resolvedName,
+            addressLabel = remote.identity?.addressLabel?.takeIf { it.isNotBlank() } ?: existing.addressLabel,
+            locality = remote.identity?.locality?.takeIf { it.isNotBlank() } ?: existing.locality,
+            region = remote.identity?.administrativeRegion?.takeIf { it.isNotBlank() } ?: existing.region,
+            country = remote.identity?.country?.takeIf { it.isNotBlank() } ?: existing.country,
+            featureName = remote.identity?.featureName?.takeIf { it.isNotBlank() } ?: existing.featureName,
+            category = remote.identity?.category?.takeIf { it.isNotBlank() } ?: existing.category,
+            geographicDetails = mergedGeoDetails,
+            nearbySummaryJson = SavedAreaNearbyCodec.encode(mergedNearby),
+            retainedNearbyCount = mergedNearby.size,
+            wikiTitle = remote.wikiInfo?.title ?: existing.wikiTitle,
+            wikiSummary = remote.wikiInfo?.summary ?: existing.wikiSummary,
+            wikiUrl = remote.wikiInfo?.url ?: existing.wikiUrl,
+            wikidataId = remote.wikiInfo?.wikidataId ?: existing.wikidataId,
+            sourceAttribution = refreshed.sourceAttribution.ifBlank { existing.sourceAttribution },
+            dataProvenance = refreshed.provenance.name,
+            userNotes = existing.userNotes,
+            tagsCsv = existing.tagsCsv,
+            retrievedAt = now,
+            updatedAt = now
+        )
+        savedAreaDao.upsertSavedArea(updated)
+        Result.success(updated)
     }
 
     suspend fun deleteSavedArea(areaId: String): Boolean = withContext(Dispatchers.IO) {
@@ -655,16 +753,19 @@ class AreaDetailsRepository(
         val hasOnlineData = remote.identity != null || remote.wikiInfo != null || remote.nearbyWikiPlaces.isNotEmpty()
 
         val nextProvenance = when {
-            baseline.isSavedSnapshot && !isRefresh -> AreaDataProvenance.SAVED_SNAPSHOT
+            baseline.isSavedSnapshot && (!isRefresh || !hasOnlineData) -> AreaDataProvenance.SAVED_SNAPSHOT
             hasOnlineData && hasLocalData -> AreaDataProvenance.HYBRID_ONLINE_AND_LOCAL
             hasOnlineData -> AreaDataProvenance.ONLINE_LIVE
             else -> AreaDataProvenance.LOCAL_ONLY
         }
 
-        val attribution = buildList {
-            if (hasLocalData) add("Local Retained OSM")
-            addAll(remote.sourceAttributions)
-        }.distinct().joinToString(" • ").ifEmpty { baseline.sourceAttribution }
+        val attribution = when {
+            baseline.isSavedSnapshot && !hasOnlineData -> baseline.sourceAttribution
+            else -> buildList {
+                if (hasLocalData) add("Local Retained OSM")
+                addAll(remote.sourceAttributions)
+            }.distinct().joinToString(" • ").ifEmpty { baseline.sourceAttribution }
+        }
 
         val partialNote = if (remote.partialErrors.isNotEmpty()) {
             remote.partialErrors.joinToString(" • ")
@@ -672,8 +773,10 @@ class AreaDetailsRepository(
             null
         }
 
+        val nextRetrievedAt = if (hasOnlineData) clockMs() else baseline.retrievedAt
+
         return baseline.copy(
-            retrievedAt = System.currentTimeMillis(),
+            retrievedAt = nextRetrievedAt,
             provenance = nextProvenance,
             locationIdentity = mergedIdentity,
             nearbyPlaces = mergedNearby,
@@ -683,7 +786,9 @@ class AreaDetailsRepository(
             isLoadingOnline = false,
             isOffline = false,
             partialWarning = partialNote,
-            errorMessage = if (!hasOnlineData && !hasLocalData) remote.fatalError else null,
+            errorMessage = if (!hasOnlineData && !hasLocalData && !baseline.isSavedSnapshot) remote.fatalError else null,
+            activeReverseProviderId = remote.providerId,
+            reverseGeocoderNote = remote.reverseGeocoderStatusNote,
             sourceAttribution = attribution
         )
     }
@@ -702,8 +807,12 @@ class AreaDetailsRepository(
         return combined.values.sortedBy { it.distanceMeters }
     }
 
-    private fun buildCacheKey(lat: Double, lng: Double, radiusMeters: Int): String {
-        return String.format(Locale.US, "%.4f,%.4f:%d", lat, lng, radiusMeters)
+    private fun buildCacheKey(providerKey: String, lat: Double, lng: Double, radiusMeters: Int): String {
+        val roundedLat = kotlin.math.round(lat * 10_000.0) / 10_000.0
+        val roundedLng = kotlin.math.round(lng * 10_000.0) / 10_000.0
+        val normLat = if (kotlin.math.abs(roundedLat) < 1e-9) 0.0 else roundedLat
+        val normLng = if (kotlin.math.abs(roundedLng) < 1e-9) 0.0 else roundedLng
+        return String.format(Locale.US, "%s:%.4f,%.4f:%d", providerKey, normLat, normLng, radiusMeters)
     }
 }
 

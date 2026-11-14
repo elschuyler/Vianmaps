@@ -24,12 +24,18 @@ import android.database.sqlite.SQLiteDatabase
 import androidx.room.Room
 import com.example.data.area.AreaDataProvenance
 import com.example.data.area.AreaDetailsRepository
+import com.example.data.area.AreaDetailsResult
 import com.example.data.area.AreaLocationIdentity
 import com.example.data.area.AreaNearbyItem
 import com.example.data.area.AreaRemoteLookupGateway
 import com.example.data.area.AreaWikiInfo
 import com.example.data.area.HttpAreaRemoteLookupGateway
+import com.example.data.area.ProviderConfigStatus
 import com.example.data.area.RemoteAreaEnrichmentResult
+import com.example.data.area.ReverseGeocodingContactValidator
+import com.example.data.area.ReverseGeocodingProviderConfig
+import com.example.data.area.ReverseGeocodingProviderRegistry
+import com.example.data.area.ReverseGeocodingProviderType
 import com.example.data.area.SavedAreaNearbyCodec
 import com.example.data.db.RouteWaypointEntity
 import com.example.data.db.SavedAreaEntity
@@ -2088,12 +2094,26 @@ class ExampleUnitTest {
             }
             .build()
 
+        val testRegistry = ReverseGeocodingProviderRegistry(
+            configs = listOf(
+                ReverseGeocodingProviderConfig(
+                    providerId = "test_nominatim",
+                    displayName = "Test Nominatim-Compatible Proxy",
+                    providerType = ReverseGeocodingProviderType.NOMINATIM_COMPATIBLE,
+                    baseUrl = "https://geocoder.vianmaps.test",
+                    contactInfo = "maintainer@vianmaps.test",
+                    minRequestIntervalMs = 0L
+                )
+            ),
+            initialProviderId = "test_nominatim"
+        )
         val happyGateway = HttpAreaRemoteLookupGateway(
+            providerRegistry = testRegistry,
             client = happyClient,
-            minNominatimIntervalMs = 0L
+            minWikipediaIntervalMs = 0L
         )
         val happyRes = happyGateway.lookupAreaOnline(41.0256, 28.9741, 250, emptyList())
-        assertTrue(seenUserAgents.all { it?.contains("VianMaps") == true })
+        assertTrue(seenUserAgents.all { it?.contains("VianMaps") == true && it.contains(".invalid") == false })
         assertEquals("Galata Tower", happyRes.identity?.primaryName)
         assertEquals("Istanbul", happyRes.identity?.locality)
         assertEquals("Turkey", happyRes.identity?.country)
@@ -2104,7 +2124,7 @@ class ExampleUnitTest {
         assertTrue(happyRes.sourceAttributions.any { it.contains("OpenStreetMap") })
         assertTrue(happyRes.sourceAttributions.any { it.contains("Wikipedia") })
 
-        // Case B: Ambiguous/distant Wikipedia + Wikipedia API 500 error -> Nominatim succeeds cleanly with partialError
+        // Case B: Ambiguous/distant Wikipedia + Wikipedia API 500 error -> Reverse geocoder succeeds cleanly with partialError
         val partialClient = OkHttpClient.Builder()
             .addInterceptor { chain ->
                 val req = chain.request()
@@ -2137,12 +2157,17 @@ class ExampleUnitTest {
             }
             .build()
 
-        val partialGateway = HttpAreaRemoteLookupGateway(client = partialClient, minNominatimIntervalMs = 0L)
+        val partialGateway = HttpAreaRemoteLookupGateway(
+            providerRegistry = testRegistry,
+            client = partialClient,
+            minWikipediaIntervalMs = 0L
+        )
         val partialRes = partialGateway.lookupAreaOnline(40.73, 31.60, 1000, emptyList())
         assertEquals("Unnamed Meadow", partialRes.identity?.primaryName)
         assertNull(partialRes.wikiInfo)
         assertNull(partialRes.fatalError)
         assertTrue(partialRes.partialErrors.isNotEmpty())
+        assertTrue(partialRes.hasTransientError)
         assertTrue(partialRes.wikiStatusNote != null)
     }
 
@@ -2489,6 +2514,461 @@ class ExampleUnitTest {
         assertNotNull(viewModel.uiState.value.plannedActionNotice)
         assertEquals("Create Note Here", viewModel.uiState.value.plannedActionNotice?.title)
         assertEquals(0, db.userPlaceDao().getPlacemarkCount())
+
+        db.savedAreaDao().clearAllSavedAreas()
+    }
+
+    // =========================================================================
+    // Phase 4.2.1 Tests: Nominatim Policy, Provider Switching, Caching & Safe Refresh
+    // =========================================================================
+
+    @Test
+    fun test61_verifyPublicNominatimDisabledWithoutValidContactOrCentralProxy(): Unit = runBlocking {
+        // 1. Placeholder/empty contacts must be strictly rejected
+        assertFalse(ReverseGeocodingContactValidator.isValidGenuineContact(null))
+        assertFalse(ReverseGeocodingContactValidator.isValidGenuineContact(""))
+        assertFalse(ReverseGeocodingContactValidator.isValidGenuineContact("vianmaps-app@example.invalid"))
+        assertFalse(ReverseGeocodingContactValidator.isValidGenuineContact("contact@example.com"))
+        assertFalse(ReverseGeocodingContactValidator.isValidGenuineContact("not-an-email"))
+        assertTrue(ReverseGeocodingContactValidator.isValidGenuineContact("support@vianmaps.test"))
+        assertTrue(ReverseGeocodingContactValidator.isValidGenuineContact("https://vianmaps.test/contact"))
+
+        // 2. Even with a genuine contact, public Nominatim MUST stay disabled without central rate-limiting proxy
+        val noProxyConfig = ReverseGeocodingProviderConfig(
+            providerId = "public_nominatim",
+            displayName = "OSM Nominatim Public",
+            providerType = ReverseGeocodingProviderType.PUBLIC_NOMINATIM,
+            baseUrl = "https://nominatim.openstreetmap.org",
+            contactInfo = "support@vianmaps.test",
+            hasCentralRateLimitingProxy = false
+        )
+        val noProxyStatus = noProxyConfig.validate()
+        assertTrue(noProxyStatus is ProviderConfigStatus.Disabled)
+
+        // 3. Default production gateway makes ZERO HTTP requests to public Nominatim and keeps local + Wiki working
+        val seenUrls = mutableListOf<String>()
+        val client = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                val req = chain.request()
+                seenUrls.add(req.url.toString())
+                val json = if (req.url.toString().contains("list=geosearch")) {
+                    """{"query":{"geosearch":[{"pageid":501,"title":"Stone Bridge","lat":41.0,"lon":29.0,"dist":45.0}]}}"""
+                } else {
+                    """{"type":"standard","title":"Stone Bridge","extract":"Historic stone arch bridge."}"""
+                }
+                Response.Builder()
+                    .request(req)
+                    .protocol(Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body(json.toResponseBody("application/json".toMediaType()))
+                    .build()
+            }
+            .build()
+
+        val defaultGateway = HttpAreaRemoteLookupGateway(
+            providerRegistry = ReverseGeocodingProviderRegistry.createDefault(),
+            client = client,
+            minWikipediaIntervalMs = 0L
+        )
+        assertTrue(defaultGateway.reverseProviderConfigStatus() is ProviderConfigStatus.Disabled)
+        assertFalse(defaultGateway.providerRegistry.supportsRemoteDynamicSwitching)
+        assertFalse(defaultGateway.providerRegistry.hasCentralRateLimitingGateway)
+
+        val result = defaultGateway.lookupAreaOnline(41.0, 29.0, 250, emptyList())
+        assertTrue(seenUrls.none { it.contains("nominatim") })
+        assertFalse(result.isReverseGeocoderEnabled)
+        assertTrue(result.reverseGeocoderStatusNote?.contains("disabled", ignoreCase = true) == true)
+        assertEquals("Stone Bridge", result.wikiInfo?.title)
+    }
+
+    @Test
+    fun test62_verifyProviderAbstractionSwitchingPhotonAndInvalidConfig(): Unit = runBlocking {
+        val seenRequests = mutableListOf<String>()
+        val client = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                val req = chain.request()
+                val url = req.url.toString()
+                seenRequests.add(url)
+                val bodyJson = when {
+                    url.contains("photon.vianmaps.test/reverse") -> """
+                        {
+                          "type": "FeatureCollection",
+                          "features": [
+                            {
+                              "type": "Feature",
+                              "properties": {
+                                "name": "Photon Harbor Park",
+                                "street": "Harbor Blvd",
+                                "housenumber": "12",
+                                "city": "Izmir",
+                                "state": "Aegean",
+                                "country": "Turkey",
+                                "osm_key": "leisure",
+                                "osm_value": "park"
+                              }
+                            }
+                          ]
+                        }
+                    """.trimIndent()
+                    url.contains("nominatim-proxy.vianmaps.test/reverse") -> """
+                        {
+                          "name": "Proxy Harbor Park",
+                          "category": "leisure",
+                          "type": "park",
+                          "address": { "city": "Izmir", "country": "Turkey" }
+                        }
+                    """.trimIndent()
+                    url.contains("list=geosearch") -> """{"query":{"geosearch":[]}}"""
+                    else -> "{}"
+                }
+                Response.Builder()
+                    .request(req)
+                    .protocol(Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body(bodyJson.toResponseBody("application/json".toMediaType()))
+                    .build()
+            }
+            .build()
+
+        val registry = ReverseGeocodingProviderRegistry(
+            configs = listOf(
+                ReverseGeocodingProviderConfig(
+                    providerId = "proxy_nominatim",
+                    displayName = "Self-Hosted Nominatim Proxy",
+                    providerType = ReverseGeocodingProviderType.NOMINATIM_COMPATIBLE,
+                    baseUrl = "https://nominatim-proxy.vianmaps.test",
+                    minRequestIntervalMs = 0L
+                ),
+                ReverseGeocodingProviderConfig(
+                    providerId = "self_photon",
+                    displayName = "Self-Hosted Photon",
+                    providerType = ReverseGeocodingProviderType.PHOTON_COMPATIBLE,
+                    baseUrl = "https://photon.vianmaps.test",
+                    minRequestIntervalMs = 0L
+                ),
+                ReverseGeocodingProviderConfig(
+                    providerId = "broken_provider",
+                    displayName = "Broken Endpoint",
+                    providerType = ReverseGeocodingProviderType.PHOTON_COMPATIBLE,
+                    baseUrl = "not-a-valid-url",
+                    minRequestIntervalMs = 0L
+                )
+            ),
+            initialProviderId = "proxy_nominatim"
+        )
+        val gateway = HttpAreaRemoteLookupGateway(
+            providerRegistry = registry,
+            client = client,
+            minWikipediaIntervalMs = 0L
+        )
+
+        // 1. Nominatim-compatible active
+        val resNom = gateway.lookupAreaOnline(38.42, 27.14, 250, emptyList())
+        assertEquals("Proxy Harbor Park", resNom.identity?.primaryName)
+        assertTrue(resNom.sourceAttributions.any { it.contains("Nominatim") })
+
+        // 2. Switch to Photon-compatible
+        assertTrue(registry.selectProvider("self_photon"))
+        val resPhoton = gateway.lookupAreaOnline(38.42, 27.14, 250, emptyList())
+        assertEquals("Photon Harbor Park", resPhoton.identity?.primaryName)
+        assertEquals("Izmir", resPhoton.identity?.locality)
+        assertEquals("© OpenStreetMap contributors (Photon)", resPhoton.identity?.attribution)
+        assertTrue(resPhoton.sourceAttributions.contains("© OpenStreetMap contributors (Photon)"))
+
+        // 3. Switch to invalid config -> gracefully disabled, makes ZERO requests to broken endpoint
+        assertTrue(registry.selectProvider("broken_provider"))
+        assertTrue(gateway.reverseProviderConfigStatus() is ProviderConfigStatus.Disabled)
+        val countBeforeBroken = seenRequests.size
+        val resBroken = gateway.lookupAreaOnline(38.42, 27.14, 250, emptyList())
+        assertFalse(resBroken.isReverseGeocoderEnabled)
+        assertTrue(seenRequests.drop(countBeforeBroken).none { it.contains("not-a-valid-url") })
+    }
+
+    @Test
+    fun test63_verifyHttp429RetryAfterWithoutRetryLoop(): Unit = runBlocking {
+        var nowMs = 1_000_000L
+        var reverseHttpCalls = 0
+        val client = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                val req = chain.request()
+                if (req.url.toString().contains("/reverse")) {
+                    reverseHttpCalls++
+                    if (reverseHttpCalls == 1) {
+                        Response.Builder()
+                            .request(req)
+                            .protocol(Protocol.HTTP_1_1)
+                            .code(429)
+                            .message("Too Many Requests")
+                            .header("Retry-After", "30")
+                            .body("Rate limit exceeded".toResponseBody("text/plain".toMediaType()))
+                            .build()
+                    } else {
+                        Response.Builder()
+                            .request(req)
+                            .protocol(Protocol.HTTP_1_1)
+                            .code(200)
+                            .message("OK")
+                            .body("""{"name":"Recovered Plaza","address":{"city":"Izmir","country":"Turkey"}}""".toResponseBody("application/json".toMediaType()))
+                            .build()
+                    }
+                } else {
+                    Response.Builder()
+                        .request(req)
+                        .protocol(Protocol.HTTP_1_1)
+                        .code(200)
+                        .message("OK")
+                        .body("""{"query":{"geosearch":[]}}""".toResponseBody("application/json".toMediaType()))
+                        .build()
+                }
+            }
+            .build()
+
+        val registry = ReverseGeocodingProviderRegistry(
+            configs = listOf(
+                ReverseGeocodingProviderConfig(
+                    providerId = "rate_test_proxy",
+                    displayName = "Rate-Test Proxy",
+                    providerType = ReverseGeocodingProviderType.NOMINATIM_COMPATIBLE,
+                    baseUrl = "https://proxy.vianmaps.test",
+                    minRequestIntervalMs = 0L
+                )
+            ),
+            initialProviderId = "rate_test_proxy"
+        )
+
+        val gateway = HttpAreaRemoteLookupGateway(
+            providerRegistry = registry,
+            client = client,
+            clockMs = { nowMs },
+            minWikipediaIntervalMs = 0L
+        )
+
+        // First call receives HTTP 429 + Retry-After: 30 — must NOT auto-retry (1 HTTP call total)
+        val firstRes = gateway.lookupAreaOnline(38.42, 27.14, 250, emptyList())
+        assertEquals(1, reverseHttpCalls)
+        assertTrue(firstRes.hasTransientError)
+        assertTrue(firstRes.partialErrors.any { it.contains("429") })
+
+        // Immediate second call during 30s cooldown fails fast without making another HTTP call
+        nowMs += 5_000L
+        val cooldownRes = gateway.lookupAreaOnline(38.42, 27.14, 250, emptyList())
+        assertEquals(1, reverseHttpCalls)
+        assertTrue(cooldownRes.hasTransientError)
+        assertTrue(cooldownRes.partialErrors.any { it.contains("cooldown") || it.contains("Retry-After") })
+
+        // Advancing clock past 30s lifts cooldown cleanly
+        nowMs += 30_000L
+        val recoveredRes = gateway.lookupAreaOnline(38.42, 27.14, 250, emptyList())
+        assertEquals(2, reverseHttpCalls)
+        assertEquals("Recovered Plaza", recoveredRes.identity?.primaryName)
+        assertFalse(recoveredRes.hasTransientError)
+    }
+
+    @Test
+    fun test64_verifyCacheSuccessVsNoResultTtlTransientExclusionAndProviderKeys(): Unit = runBlocking {
+        val db = AppDatabase.getInstance(context)
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            db.clearAllTables()
+        }
+
+        var nowMs = 5_000_000L
+        var activeProviderId = "prov_a"
+        var gatewayCalls = 0
+        var nextBehavior = "TRANSIENT_ERROR"
+
+        val fakeGateway = object : AreaRemoteLookupGateway {
+            override fun activeProviderCacheKey(): String = activeProviderId
+            override suspend fun lookupAreaOnline(
+                latitude: Double,
+                longitude: Double,
+                radiusMeters: Int,
+                localHintNames: List<String>
+            ): RemoteAreaEnrichmentResult {
+                gatewayCalls++
+                return when (nextBehavior) {
+                    "TRANSIENT_ERROR" -> RemoteAreaEnrichmentResult(
+                        providerId = activeProviderId,
+                        hasTransientError = true,
+                        partialErrors = listOf("Timeout"),
+                        fatalError = "Timeout"
+                    )
+                    "NO_RESULT" -> RemoteAreaEnrichmentResult(
+                        providerId = activeProviderId,
+                        isReverseGeocoderEnabled = true,
+                        hasTransientError = false,
+                        isValidNoResult = true,
+                        sourceAttributions = listOf("© Provider $activeProviderId")
+                    )
+                    else -> RemoteAreaEnrichmentResult(
+                        providerId = activeProviderId,
+                        isReverseGeocoderEnabled = true,
+                        identity = AreaLocationIdentity(primaryName = "Name from $activeProviderId", country = "TR"),
+                        hasTransientError = false,
+                        isValidNoResult = false,
+                        sourceAttributions = listOf("© Provider $activeProviderId")
+                    )
+                }
+            }
+        }
+
+        val repo = AreaDetailsRepository(context, fakeGateway, clockMs = { nowMs })
+        val saved = repo.saveAreaSnapshot(
+            AreaDetailsResult(latitude = 10.0, longitude = 10.0, locationIdentity = AreaLocationIdentity("Keep Saved"))
+        ).getOrThrow()
+
+        val baseline = repo.queryLocalSnapshot(0.0, 0.0)
+
+        // 1. Transient error must NOT be cached
+        nextBehavior = "TRANSIENT_ERROR"
+        repo.enrichWithOnlineData(baseline, isOnlineAllowed = true)
+        assertEquals(1, gatewayCalls)
+        repo.enrichWithOnlineData(baseline, isOnlineAllowed = true)
+        assertEquals(2, gatewayCalls)
+
+        // 2. Valid no-result is cached for NO_RESULT_CACHE_TTL_MS (2 min)
+        nextBehavior = "NO_RESULT"
+        repo.enrichWithOnlineData(baseline, isOnlineAllowed = true)
+        assertEquals(3, gatewayCalls)
+        nowMs += 60_000L // +1 min -> still cached
+        repo.enrichWithOnlineData(baseline, isOnlineAllowed = true)
+        assertEquals(3, gatewayCalls)
+        nowMs += 90_000L // +2.5 min total -> no-result TTL expired, refreshes
+        nextBehavior = "SUCCESS"
+        val successRes = repo.enrichWithOnlineData(baseline, isOnlineAllowed = true)
+        assertEquals(4, gatewayCalls)
+        assertEquals("Name from prov_a", successRes.locationIdentity?.primaryName)
+
+        // 3. Coordinate -0.0 normalizes cleanly to 0.0 cache key
+        val negZeroBaseline = baseline.copy(latitude = -0.00001, longitude = -0.00001)
+        val cachedHit = repo.enrichWithOnlineData(negZeroBaseline, isOnlineAllowed = true)
+        assertEquals(4, gatewayCalls)
+        assertEquals("Name from prov_a", cachedHit.locationIdentity?.primaryName)
+
+        // 4. Switching provider uses separate cache key
+        activeProviderId = "prov_b"
+        val switchedRes = repo.enrichWithOnlineData(baseline, isOnlineAllowed = true)
+        assertEquals(5, gatewayCalls)
+        assertEquals("Name from prov_b", switchedRes.locationIdentity?.primaryName)
+
+        // 5. Success TTL stays valid past 3 min and refreshes after >10 min
+        nowMs += 5 * 60 * 1000L
+        repo.enrichWithOnlineData(baseline, isOnlineAllowed = true)
+        assertEquals(5, gatewayCalls)
+        nowMs += 6 * 60 * 1000L // >10 min
+        repo.enrichWithOnlineData(baseline, isOnlineAllowed = true)
+        assertEquals(6, gatewayCalls)
+
+        // 6. clearRemoteCache never deletes SavedAreaEntity
+        repo.clearRemoteCache()
+        assertNotNull(repo.getSavedAreaById(saved.id))
+        db.savedAreaDao().clearAllSavedAreas()
+    }
+
+    @Test
+    fun test65_verifyFailedRefreshPreservesSavedNotesTagsAndOfflineAttribution(): Unit = runBlocking {
+        val db = AppDatabase.getInstance(context)
+        db.savedAreaDao().clearAllSavedAreas()
+        db.osmPoiDao().clearAllPois()
+
+        var nowMs = 10_000_000L
+        var gatewayMode = "INITIAL"
+        val controlledGateway = object : AreaRemoteLookupGateway {
+            override fun activeProviderCacheKey(): String = "safe_refresh_test"
+            override suspend fun lookupAreaOnline(
+                latitude: Double,
+                longitude: Double,
+                radiusMeters: Int,
+                localHintNames: List<String>
+            ): RemoteAreaEnrichmentResult {
+                return when (gatewayMode) {
+                    "INITIAL" -> RemoteAreaEnrichmentResult(
+                        providerId = "safe_refresh_test",
+                        isReverseGeocoderEnabled = true,
+                        identity = AreaLocationIdentity(
+                            primaryName = "Cappadocia Terrace",
+                            addressLabel = "Goreme Panorama Way",
+                            locality = "Goreme",
+                            administrativeRegion = "Nevsehir",
+                            country = "Turkey"
+                        ),
+                        wikiInfo = AreaWikiInfo(
+                            title = "Göreme",
+                            summary = "Historic cave architecture region.",
+                            url = "https://en.wikipedia.org/wiki/G%C3%B6reme",
+                            wikidataId = "Q329346"
+                        ),
+                        sourceAttributions = listOf(
+                            "© OpenStreetMap contributors (Self-Hosted Proxy)",
+                            "© Wikipedia contributors (CC BY-SA 4.0)"
+                        )
+                    )
+                    "HTTP_429_FAILURE" -> RemoteAreaEnrichmentResult(
+                        providerId = "safe_refresh_test",
+                        hasTransientError = true,
+                        partialErrors = listOf("HTTP 429 Too Many Requests"),
+                        fatalError = "HTTP 429 Too Many Requests"
+                    )
+                    else -> RemoteAreaEnrichmentResult(
+                        providerId = "safe_refresh_test",
+                        isValidNoResult = true,
+                        reverseGeocoderStatusNote = "Reverse geocoder returned no fresh result."
+                    )
+                }
+            }
+        }
+
+        val repo = AreaDetailsRepository(context, controlledGateway, clockMs = { nowMs })
+        val live = repo.enrichWithOnlineData(repo.queryLocalSnapshot(38.64, 34.83), isOnlineAllowed = true)
+        val saved = repo.saveAreaSnapshot(live, userNotes = "Sunrise spot").getOrThrow()
+        val retrievedTimestamp = saved.retrievedAt
+
+        // User edits metadata & tags 1 hour later — must NOT alter retrievedAt
+        nowMs += 3_600_000L
+        val edited = repo.updateSavedAreaMetadata(
+            areaId = saved.id,
+            name = "My Terrace Snapshot",
+            category = "viewpoint",
+            addressLabel = "Goreme Panorama Way",
+            userNotes = "Bring tripod before 6am",
+            tagsText = "sunrise, balloons"
+        ).getOrThrow()
+        assertEquals(retrievedTimestamp, edited.retrievedAt)
+        assertTrue(edited.updatedAt > edited.retrievedAt)
+
+        // Failed refresh (429/transient error) MUST fail without overwriting name, notes, tags, wiki, attribution, or timestamps
+        nowMs += 60_000L
+        gatewayMode = "HTTP_429_FAILURE"
+        val fail429 = repo.refreshSavedAreaOnline(saved.id, isOnlineAllowed = true)
+        assertTrue(fail429.isFailure)
+
+        val afterFail1 = repo.getSavedAreaById(saved.id)!!
+        assertEquals("My Terrace Snapshot", afterFail1.name)
+        assertEquals("Bring tripod before 6am", afterFail1.userNotes)
+        assertEquals("sunrise, balloons", afterFail1.tagsCsv)
+        assertEquals("Göreme", afterFail1.wikiTitle)
+        assertTrue(afterFail1.sourceAttribution.contains("Wikipedia"))
+        assertEquals(retrievedTimestamp, afterFail1.retrievedAt)
+
+        // Empty/disabled remote response MUST ALSO preserve good saved record
+        gatewayMode = "EMPTY"
+        val failEmpty = repo.refreshSavedAreaOnline(saved.id, isOnlineAllowed = true)
+        assertTrue(failEmpty.isFailure)
+        val afterFail2 = repo.getSavedAreaById(saved.id)!!
+        assertEquals("My Terrace Snapshot", afterFail2.name)
+        assertEquals("Bring tripod before 6am", afterFail2.userNotes)
+        assertEquals("Göreme", afterFail2.wikiTitle)
+
+        // Offline reopening preserves attribution & separate timestamps with 0 network reliance
+        val reopenedOffline = repo.queryLocalSnapshot(38.64, 34.83)
+        assertTrue(reopenedOffline.isSavedSnapshot)
+        assertEquals(AreaDataProvenance.SAVED_SNAPSHOT, reopenedOffline.provenance)
+        assertEquals(retrievedTimestamp, reopenedOffline.retrievedAt)
+        assertEquals(edited.updatedAt, reopenedOffline.savedAt)
+        assertTrue(reopenedOffline.sourceAttribution.contains("Wikipedia"))
+        assertTrue(reopenedOffline.sourceAttribution.contains("OpenStreetMap"))
+        assertEquals("Göreme", reopenedOffline.wikiInfo?.title)
 
         db.savedAreaDao().clearAllSavedAreas()
     }

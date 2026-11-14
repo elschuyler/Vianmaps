@@ -343,9 +343,15 @@ private fun SavedAreaCard(
 
         Spacer(modifier = Modifier.height(3.dp))
         Text(
-            text = "Snapshot saved ${AreaCoordinateFormatter.formatTimestampRelativeOrShort(area.retrievedAt)} • ${area.sourceAttribution}",
+            text = "Data retrieved: ${AreaCoordinateFormatter.formatTimestampRelativeOrShort(area.retrievedAt)} • Record edited: ${AreaCoordinateFormatter.formatTimestampRelativeOrShort(area.updatedAt)}",
             fontSize = 9.5.sp,
             color = TextDarkMuted
+        )
+        Text(
+            text = "Sources: ${area.sourceAttribution.ifBlank { "Local OSM Database" }}",
+            fontSize = 9.5.sp,
+            color = TextDarkMuted,
+            modifier = Modifier.testTag("saved_area_attribution_${area.id}")
         )
 
         HorizontalDivider(color = SurfaceBorderLight, thickness = 0.5.dp, modifier = Modifier.padding(vertical = 6.dp))

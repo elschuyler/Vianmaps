@@ -1481,11 +1481,54 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
                     details = current.details.copy(
                         isLoadingOnline = false,
                         isOffline = true,
-                        partialWarning = "Internet is off or device is offline. Enable internet to refresh online details."
+                        partialWarning = "Internet is off or device is offline. Existing data preserved."
                     )
                 ),
                 userFeedbackMessage = "Cannot refresh online: Internet is offline or blocked."
             )
+            return
+        }
+        val savedId = current.details.savedAreaId
+        if (current.details.isSavedSnapshot && !savedId.isNullOrBlank()) {
+            areaLookupJob?.cancel()
+            _uiState.value = _uiState.value.copy(
+                areaDetailsState = current.copy(
+                    details = current.details.copy(isLoadingOnline = true, partialWarning = null)
+                )
+            )
+            areaLookupJob = viewModelScope.launch {
+                val result = areaRepository.refreshSavedAreaOnline(savedId, isOnlineAllowed = true)
+                result.fold(
+                    onSuccess = { updated ->
+                        val reloaded = areaRepository.queryLocalSnapshot(updated.latitude, updated.longitude)
+                        val active = _uiState.value.areaDetailsState
+                        if (active != null && active.details.savedAreaId == savedId) {
+                            _uiState.value = _uiState.value.copy(
+                                areaDetailsState = active.copy(
+                                    details = reloaded.copy(isLoadingOnline = false),
+                                    customNameDraft = updated.name,
+                                    userNotesDraft = updated.userNotes
+                                ),
+                                userFeedbackMessage = "Refreshed '${updated.name}' online"
+                            )
+                        }
+                    },
+                    onFailure = { err ->
+                        val active = _uiState.value.areaDetailsState
+                        if (active != null && active.details.savedAreaId == savedId) {
+                            _uiState.value = _uiState.value.copy(
+                                areaDetailsState = active.copy(
+                                    details = active.details.copy(
+                                        isLoadingOnline = false,
+                                        partialWarning = err.message ?: "Refresh failed; existing saved snapshot preserved."
+                                    )
+                                ),
+                                userFeedbackMessage = err.message ?: "Refresh failed; existing saved snapshot preserved."
+                            )
+                        }
+                    }
+                )
+            }
             return
         }
         openAreaDetailsAt(

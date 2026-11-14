@@ -305,35 +305,52 @@ fun AreaDetailsPopup(
                         .padding(vertical = 6.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    // Snapshot outdated & non-tile notice
+                    // Snapshot outdated & non-tile notice with separate retrieved vs edited timestamps
                     if (details.isSavedSnapshot) {
-                        Row(
+                        Column(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(8.dp))
                                 .background(AmberWarnBg)
                                 .border(1.dp, AmberWarnBorder, RoundedCornerShape(8.dp))
                                 .padding(horizontal = 8.dp, vertical = 6.dp),
-                            verticalAlignment = Alignment.Top
+                            verticalArrangement = Arrangement.spacedBy(3.dp)
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.WarningAmber,
-                                contentDescription = null,
-                                tint = AmberWarnText,
-                                modifier = Modifier.size(14.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
+                            Row(verticalAlignment = Alignment.Top) {
+                                Icon(
+                                    imageVector = Icons.Default.WarningAmber,
+                                    contentDescription = null,
+                                    tint = AmberWarnText,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "Saved offline snapshot. Details may have changed since retrieval; surrounding map tiles are NOT saved automatically.",
+                                    fontSize = 10.sp,
+                                    color = AmberWarnText,
+                                    lineHeight = 13.sp
+                                )
+                            }
+                            val editedTs = savedAreaEntity?.updatedAt ?: details.savedAt
+                            val timeLine = buildString {
+                                append("Data retrieved: ")
+                                append(AreaCoordinateFormatter.formatTimestampRelativeOrShort(details.retrievedAt))
+                                if (editedTs != null && editedTs > 0L) {
+                                    append("  •  Record edited: ")
+                                    append(AreaCoordinateFormatter.formatTimestampRelativeOrShort(editedTs))
+                                }
+                            }
                             Text(
-                                text = "Saved snapshot (${AreaCoordinateFormatter.formatTimestampRelativeOrShort(details.retrievedAt)}). Details may be outdated; map tiles around this point are NOT saved automatically.",
-                                fontSize = 10.sp,
-                                color = AmberWarnText,
-                                lineHeight = 13.sp
+                                text = timeLine,
+                                fontSize = 9.5.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = AmberWarnText
                             )
                         }
                     }
 
-                    // Partial or explicit online error notice
-                    val notice = details.errorMessage ?: details.partialWarning
+                    // Partial, error, or disabled reverse-geocoder policy notice
+                    val notice = details.errorMessage ?: details.partialWarning ?: details.reverseGeocoderNote
                     if (!notice.isNullOrBlank()) {
                         Row(
                             modifier = Modifier
@@ -567,7 +584,8 @@ fun AreaDetailsPopup(
                         Text(
                             text = "Sources: ${details.sourceAttribution}",
                             fontSize = 9.5.sp,
-                            color = TextDarkMuted
+                            color = TextDarkMuted,
+                            modifier = Modifier.testTag("area_details_attribution")
                         )
                     }
                 }

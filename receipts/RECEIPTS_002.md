@@ -322,3 +322,29 @@ This file series is the project's permanent audit trail across sessions. Each fi
 * **Deviations from request**: None.
 * **Known issues / follow-up**: Physical-device verification of MapLibre GL single-tap vs long-press gestures, live Nominatim/Wikipedia network lookups, anchored popup edge clamping during pan/zoom, and `AREA_PIN_*` rendering remains manual on hardware.
 
+---
+
+### Entry 2026-11-13T23:26:10Z — Phase 4.2.1: Area Lookup Policy & Reliability Hardening
+* **Summary**: Harden Phase 4.2 Area Details lookup by disabling unconfigured public Nominatim by default, adding pluggable Nominatim/Photon reverse-geocoding providers, enforcing HTTP 429 Retry-After without retry loops, separating success vs no-result cache TTLs by provider key, and hardening saved snapshot refresh and offline attribution.
+* **Exact files touched**:
+  - `app/src/main/java/com/example/data/area/ReverseGeocodingProvider.kt` (created `ReverseGeocodingProvider`, `ReverseGeocodingProviderType`, `ReverseGeocodingContactValidator`, `ProviderConfigStatus`, `ReverseGeocodingProviderConfig`, `ReverseGeocodingOutcome`, `DisabledReverseGeocodingProvider`, `NominatimCompatibleReverseProvider`, `PhotonCompatibleReverseProvider`, and `ReverseGeocodingProviderRegistry` with `supportsRemoteDynamicSwitching = false` and `hasCentralRateLimitingGateway = false`)
+  - `app/src/main/java/com/example/data/area/AreaLookupModels.kt` (added `activeReverseProviderId` and `reverseGeocoderNote` to `AreaDetailsResult`)
+  - `app/src/main/java/com/example/data/area/AreaRemoteLookupGateway.kt` (removed `.invalid` placeholder User-Agent; routed reverse geocoding through `ReverseGeocodingProviderRegistry`; kept public Nominatim disabled when unconfigured; added HTTP 429 / `Retry-After` per-provider cooldown tracking with zero retry loops; accurately set `hasTransientError` and `isValidNoResult` and retained `partialErrors`)
+  - `app/src/main/java/com/example/data/area/AreaDetailsRepository.kt` (injected `clockMs`; added separate `SUCCESS_CACHE_TTL_MS = 10 min` and `NO_RESULT_CACHE_TTL_MS = 2 min`; scoped cache keys and in-flight coalescing keys by active provider + `-0.0`-normalized coordinates + radius; excluded transient errors from cache; hardened `refreshSavedAreaOnline` and `updateSavedAreaMetadata` so `retrievedAt` stays distinct from `updatedAt` and failed/empty refreshes preserve existing saved data)
+  - `app/src/main/java/com/example/ui/screens/MapViewModel.kt` (hardened `refreshAreaDetailsOnline` on saved snapshots to use `refreshSavedAreaOnline` so failed refreshes preserve existing snapshot state)
+  - `app/src/main/java/com/example/ui/components/AreaDetailsPopup.kt` (separated `Data retrieved` vs `Record edited` timestamps, surfaced `reverseGeocoderNote`, and preserved `sourceAttribution` offline)
+  - `app/src/main/java/com/example/ui/components/SavedAreasWorkspace.kt` (separated `Data retrieved` vs `Record edited` timestamps and displayed preserved `sourceAttribution`)
+  - `app/src/test/java/com/example/ExampleUnitTest.kt` (updated `test55` to inject test provider config and assert zero `.invalid` UA; added `test61`–`test65` covering contact validation, default disabled public Nominatim, Photon vs Nominatim switching and invalid config, HTTP 429 `Retry-After` cooldown without retry loops, success vs no-result TTLs / transient error exclusion / provider cache keys, and failed refresh preservation + offline attribution)
+  - `BLUEPRINT.md` (added Phase 4.2.1 phase status and ledger)
+  - `receipts/RECEIPTS_002.md` (appended Phase 4.2.1 audit entry)
+* **What was actually done**:
+  - **Contact & Public Nominatim Policy**: Removed placeholder `example.invalid` contact. Because no genuine project contact exists and no central application-wide <=1 req/s rate-limiting proxy exists, `PublicNominatimProductionDefault` stays disabled (`ProviderConfigStatus.Disabled`). Client-side mutex pacing is strictly local per-device spacing, not application-wide compliance. Local OSM lookup and optional Wikipedia enrichment remain operational.
+  - **Provider Abstraction & Remote Switching**: Implemented clean provider interface supporting Nominatim-compatible JSON and Photon GeoJSON reverse endpoints plus invalid-config gating; `supportsRemoteDynamicSwitching = false` is documented plainly as no remote configuration backend exists in the app.
+  - **Cache & Refresh Reliability**: Implemented provider-keyed caching with 10-minute success TTL and 2-minute no-result TTL, excluding transient errors, and prevented failed or empty refreshes from overwriting saved area names, notes, tags, wiki summaries, attribution, or timestamps (`retrievedAt` vs `updatedAt`).
+* **How it was verified**:
+  - Local JVM Robolectric test suite (`gradle :app:testDebugUnitTest --console=plain`): `TEST-com.example.ExampleUnitTest.xml` reported 65/65 tests passed (`tests="65"`, `skipped="0"`, `failures="0"`, `errors="0"`, BUILD SUCCESSFUL in 1m 2s). HTTP reverse-geocoder/Wikipedia behavior tested against local mocked `OkHttpClient` interceptors and injectable clocks.
+  - Container build (`compile_applet`): verified after final edits.
+  - On-device verification: Not tested on physical Android hardware or streaming emulator in this container (no ADB/emulator available).
+* **Deviations from request**: None. Left pre-existing Phase 3 `VisibleTileCoordinator.kt` User-Agent untouched per scope boundary (zero `Area` lookup code retains placeholder or hardcoded personal contacts).
+* **Known issues / follow-up**: Remaining infrastructure required for enabling public Nominatim in production: (1) configured non-placeholder project contact address, (2) central application-wide proxy/rate-limiter enforcing <=1 req/s globally across all clients, and (3) optional remote config backend if over-the-air provider switching without an app update is desired. Real-world device verification remains manual.
+
