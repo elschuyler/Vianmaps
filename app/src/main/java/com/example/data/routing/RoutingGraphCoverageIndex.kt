@@ -39,12 +39,15 @@ data class GraphCoverageReport(
  * Never treats visualization MVT tiles as routable binary graph tiles.
  * If no compatible binary graph source is configured or downloaded, reports NOT_CONFIGURED or MISSING_COVERAGE.
  */
-class RoutingGraphCoverageIndex(private val context: Context) {
+class RoutingGraphCoverageIndex(
+    context: Context,
+    private val db: AppDatabase = AppDatabase.getInstance(context.applicationContext ?: context)
+) {
 
-    private val db = AppDatabase.getInstance(context)
+    private val appContext: Context = context.applicationContext ?: context
     private val graphDao = db.routingGraphTileDao()
 
-    private val baseGraphDir = File(context.filesDir, "routing_graph")
+    private val baseGraphDir = File(appContext.filesDir, "routing_graph")
 
     /**
      * Calculates the required Valhalla graph tiles for an area and evaluates readiness.

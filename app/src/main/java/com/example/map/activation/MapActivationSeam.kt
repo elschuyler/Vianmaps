@@ -1,11 +1,13 @@
 package com.example.map.activation
 
+import android.app.Application
 import android.content.Context
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.diagnostics.DiagnosticRepository
@@ -119,19 +121,33 @@ object DefaultMapRuntimeInitializer : MapRuntimeInitializer {
 
 /**
  * Coordinates lazy, thread-safe, once-per-process Map runtime initialization
- * and gates MapViewModel + MainMapScreen construction behind [MapActivationState.Active].
+ * and owns [MapRuntimeDependencies] + lazy [MapViewModel] / [MainMapScreen]
+ * construction behind [MapActivationState.Active].
  */
 class MapActivationCoordinator(
     private val runtimeInitializer: MapRuntimeInitializer = DefaultMapRuntimeInitializer,
-    private val activeContent: @Composable (Modifier) -> Unit = { mod ->
-        val mapViewModel: MapViewModel = viewModel()
-        MainMapScreen(viewModel = mapViewModel, modifier = mod)
-    }
+    private val dependenciesFactory: (Context) -> MapRuntimeDependencies = { appCtx ->
+        MapRuntimeDependencies(appCtx)
+    },
+    private val activeContentWithDeps: (@Composable (Modifier, MapRuntimeDependencies) -> Unit)? = null
 ) : MapActivationBoundary {
+
+    constructor(
+        runtimeInitializer: MapRuntimeInitializer = DefaultMapRuntimeInitializer,
+        activeContent: @Composable (Modifier) -> Unit
+    ) : this(
+        runtimeInitializer = runtimeInitializer,
+        activeContentWithDeps = { mod, _ -> activeContent(mod) }
+    )
 
     private val initLock = Any()
     private val _state = MutableStateFlow<MapActivationState>(MapActivationState.Inactive)
     override val state: StateFlow<MapActivationState> = _state.asStateFlow()
+
+    @Volatile
+    private var activeDependencies: MapRuntimeDependencies? = null
+
+    internal fun dependenciesOrNull(): MapRuntimeDependencies? = activeDependencies
 
     override fun activate(context: Context): MapActivationResult {
         if (_state.value is MapActivationState.Active) {
@@ -147,6 +163,9 @@ class MapActivationCoordinator(
             try {
                 val appContext = context.applicationContext ?: context
                 runtimeInitializer.initialize(appContext)
+                if (activeDependencies == null) {
+                    activeDependencies = dependenciesFactory(appContext)
+                }
                 _state.value = MapActivationState.Active
                 MapActivationResult.Activated
             } catch (ce: kotlinx.coroutines.CancellationException) {
@@ -170,11 +189,22 @@ class MapActivationCoordinator(
     @Composable
     override fun Content(modifier: Modifier) {
         val currentState by state.collectAsStateWithLifecycle()
-        when (currentState) {
-            is MapActivationState.Active -> activeContent(modifier)
-            is MapActivationState.Inactive,
-            is MapActivationState.Activating,
-            is MapActivationState.Failed -> Box(modifier = modifier.fillMaxSize())
+        val deps = activeDependencies
+        when {
+            currentState is MapActivationState.Active && deps != null -> {
+                val custom = activeContentWithDeps
+                if (custom != null) {
+                    custom(modifier, deps)
+                } else {
+                    val context = LocalContext.current
+                    val app = (context.applicationContext as? Application)
+                        ?: (context as? Application)
+                        ?: error("Application context required for MapViewModel activation")
+                    val mapViewModel: MapViewModel = viewModel(factory = deps.viewModelFactory(app))
+                    MainMapScreen(viewModel = mapViewModel, modifier = modifier)
+                }
+            }
+            else -> Box(modifier = modifier.fillMaxSize())
         }
     }
 }

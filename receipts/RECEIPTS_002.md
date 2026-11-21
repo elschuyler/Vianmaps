@@ -369,3 +369,32 @@ This file series is the project's permanent audit trail across sessions. Each fi
 * **Deviations from request**: None (`BLUEPRINT.md` was intentionally left untouched per Stage 1's "Do NOT implement or begin: ... Blueprint rewriting" constraint).
 * **Known issues / follow-up**: Native `DefaultMapRuntimeInitializer` (`MapLibre.getInstance`, `OfflineManager`, `MapLibre.setConnected`) and full `MainActivity` launch into `MainMapScreen` require manual on-device QA on Android hardware. Stop at Stage 1 pending explicit approval for Stage 2.
 
+---
+
+### Entry 2026-11-21T12:24:00Z — Stage 2: Separate Map Responsibilities & Dependency Construction
+* **Summary**: Centralize Map-owned repository and service construction behind `MapActivationBoundary`, decouple `MapViewModel`/`MainMapScreen` from direct `AppDatabase`/repository instantiation, and eliminate the duplicate `OsmOfflineDataRepository` instance inside `VisibleTileCoordinator`.
+* **Exact files touched**:
+  - `app/src/main/java/com/example/data/storage/MapStorageService.kt` (created Map-owned storage reporting & per-provider cache clearing collaborator wrapping `StorageCalculationManager` and shared `AppDatabase`)
+  - `app/src/main/java/com/example/map/activation/MapRuntimeDependencies.kt` (created centralized post-activation dependency container with `SYNCHRONIZED` lazy shared instances and `createVisibleTileCoordinator`, `createEngineController`, and `viewModelFactory`)
+  - `app/src/main/java/com/example/diagnostics/NetworkDiagnosticsMonitor.kt` (added lock-guarded `ensureRegistered()` and idempotent `unregister()` for safe reuse across warm Activity relaunches)
+  - `app/src/main/java/com/example/data/tile/TileStorageManager.kt` (added shared `db: AppDatabase` constructor injection with backward-compatible default)
+  - `app/src/main/java/com/example/data/osm/OsmOfflineDataRepository.kt` (added shared `db: AppDatabase` constructor injection with backward-compatible default)
+  - `app/src/main/java/com/example/data/routing/RoutingGraphCoverageIndex.kt` (added shared `db: AppDatabase` constructor injection with backward-compatible default)
+  - `app/src/main/java/com/example/data/places/PlacesAndRoutesRepository.kt` (added shared `db: AppDatabase` constructor injection with backward-compatible default)
+  - `app/src/main/java/com/example/data/area/AreaDetailsRepository.kt` (added shared `db: AppDatabase` constructor injection with backward-compatible default)
+  - `app/src/main/java/com/example/map/engine/MapEngineController.kt` (normalized to `appContext`, added optional `visibleTileCoordinatorFactory`, and made `visibleTileCoordinator` lazy)
+  - `app/src/main/java/com/example/map/activation/MapActivationSeam.kt` (wired `MapRuntimeDependencies` strictly after successful `runtimeInitializer.initialize(appContext)` inside `MapActivationCoordinator`, and injected `deps.viewModelFactory(app)` inside `Content`)
+  - `app/src/main/java/com/example/ui/screens/MapViewModel.kt` (switched to `MapRuntimeDependencies` injection, observed `areaRepository.observeSavedAreas()`, delegated storage calls to `MapStorageService`, exposed `createMapEngineController(...)`, and ensured `networkMonitor.ensureRegistered()` in `init`)
+  - `app/src/main/java/com/example/ui/screens/MainMapScreen.kt` (updated the single `remember` controller construction call site to `viewModel.createMapEngineController(...)`, leaving UI and `MapView` lifecycle untouched)
+  - `app/src/test/java/com/example/MapActivationSeamTest.kt` (added `stage2_01`–`stage2_05` covering lazy post-activation dependency creation, shared single instances without duplicate `VisibleTileCoordinator` repositories, `MapViewModel`/`MapStorageService` wiring, idempotent `NetworkDiagnosticsMonitor` re-registration, and thin `MainActivity` isolation)
+  - `receipts/RECEIPTS_002.md` (appended Stage 2 audit entry)
+* **What was actually done**:
+  - Moved `AppDatabase`, `AppPreferencesRepository`, `TileStorageManager`, `OsmOfflineDataRepository`, `RoutingGraphCoverageIndex`, `PlacesAndRoutesRepository`, `HttpAreaRemoteLookupGateway`, `AreaDetailsRepository`, `MapStorageService`, and `NetworkDiagnosticsMonitor` construction out of `MapViewModel` and `MainMapScreen` into `MapRuntimeDependencies`.
+  - Wired `MapEngineController` and `VisibleTileCoordinator` creation through `MapViewModel.createMapEngineController(...)` -> `MapRuntimeDependencies.createVisibleTileCoordinator()`, eliminating the second `OsmOfflineDataRepository` previously instantiated by `MainMapScreen` -> `MapEngineController(context)` -> `VisibleTileCoordinator(context)`.
+  - Preserved UI freeze, `MapView` single-instance `remember`/`DisposableEffect(lifecycleOwner)`/`onLowMemory` lifecycle, `MainActivity` host decoupling, and Room `map_app_master.db` version 3 (`MIGRATION_1_2`, `MIGRATION_2_3`, `fallbackToDestructiveMigration(false)`) unchanged.
+* **How it was verified**:
+  - Local JVM/Robolectric unit tests (`gradle :app:testDebugUnitTest --console=plain`): `TEST-com.example.ExampleUnitTest.xml` reported 65/65 passed (`skipped="0"`, `failures="0"`, `errors="0"`) and `TEST-com.example.MapActivationSeamTest.xml` reported 10/10 passed (`skipped="0"`, `failures="0"`, `errors="0"`) — 75/75 passed total. Native MapLibre runtime calls in `MapActivationSeamTest` use an injectable `MapRuntimeInitializer` seam on JVM.
+  - Container applet compilation (`compile_applet`): `Build succeeded - the applet is compiled`.
+  - On-device verification: Not tested on physical Android hardware or streaming emulator in this container (no emulator/ADB available).
+* **Deviations from request**: None (`BLUEPRINT.md` left untouched as instructed).
+* **Known issues / follow-up**: Native `MapView` startup, controller wiring inside `MainMapScreen`, tile acquisition, offline storage calculations, and `NetworkDiagnosticsMonitor` warm-relaunch behavior require manual on-device QA. Stop at Stage 2 pending explicit approval for Stage 3.

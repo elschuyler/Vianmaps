@@ -73,13 +73,17 @@ data class TileStorageStats(
  * Enforces atomic file writes, CRC32 checksums, Room metadata synchronization,
  * MapLibre C++ OfflineManager resource injection, and in-flight request deduplication.
  */
-class TileStorageManager(private val context: Context) {
+class TileStorageManager(
+    context: Context,
+    private val db: AppDatabase = AppDatabase.getInstance(context.applicationContext ?: context)
+) {
 
-    private val baseStorageDir: File = File(context.filesDir, "retained_tiles").apply {
+    private val context: Context = context.applicationContext ?: context
+
+    private val baseStorageDir: File = File(this.context.filesDir, "retained_tiles").apply {
         if (!exists()) mkdirs()
     }
 
-    private val db = AppDatabase.getInstance(context)
     private val tileDao = db.retainedTileDao()
 
     // In-flight request locks: "provider:category:z/x/y" -> timestamp

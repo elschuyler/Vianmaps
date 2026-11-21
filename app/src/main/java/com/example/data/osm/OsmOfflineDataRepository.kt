@@ -18,9 +18,11 @@ import kotlinx.coroutines.withContext
  * acquired from vector tiles, enforcing strict deduplication across tile boundary buffers.
  * Survives app restarts, force stops, and functions completely offline in airplane mode.
  */
-class OsmOfflineDataRepository(private val context: Context) {
+class OsmOfflineDataRepository(
+    context: Context,
+    private val db: AppDatabase = AppDatabase.getInstance(context.applicationContext ?: context)
+) {
 
-    private val db = AppDatabase.getInstance(context)
     private val poiDao = db.osmPoiDao()
     private val buildingDao = db.osmBuildingDao()
     private val regionDao = db.osmRegionDao()

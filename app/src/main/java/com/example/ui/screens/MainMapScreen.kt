@@ -75,10 +75,9 @@ fun MainMapScreen(
     val coroutineScope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
 
-    // Remember MapEngineController across recompositions
+    // Remember MapEngineController across recompositions (owned via MapRuntimeDependencies)
     val controller = remember {
-        MapEngineController(
-            context = context,
+        viewModel.createMapEngineController(
             initialLat = uiState.camera.latitude,
             initialLng = uiState.camera.longitude,
             initialZoom = uiState.camera.zoom,

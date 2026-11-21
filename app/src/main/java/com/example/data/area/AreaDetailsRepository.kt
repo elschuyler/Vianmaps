@@ -40,9 +40,9 @@ import java.util.concurrent.ConcurrentHashMap
 class AreaDetailsRepository(
     context: Context,
     private val remoteGateway: AreaRemoteLookupGateway = HttpAreaRemoteLookupGateway(),
-    private val clockMs: () -> Long = { System.currentTimeMillis() }
+    private val clockMs: () -> Long = { System.currentTimeMillis() },
+    private val db: AppDatabase = AppDatabase.getInstance(context.applicationContext ?: context)
 ) {
-    private val db = AppDatabase.getInstance(context)
     private val savedAreaDao = db.savedAreaDao()
     private val poiDao = db.osmPoiDao()
     private val buildingDao = db.osmBuildingDao()

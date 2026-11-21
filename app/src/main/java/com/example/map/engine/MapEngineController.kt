@@ -37,13 +37,16 @@ import org.maplibre.geojson.Point
  * Manages hybrid style composition and triggers visible-tile acquisition.
  */
 class MapEngineController(
-    private val context: Context,
+    context: Context,
     val initialLat: Double,
     val initialLng: Double,
     val initialZoom: Double,
     val initialBearing: Double,
-    private val onCameraMoved: (lat: Double, lng: Double, zoom: Double, bearing: Double) -> Unit
+    private val onCameraMoved: (lat: Double, lng: Double, zoom: Double, bearing: Double) -> Unit,
+    visibleTileCoordinatorFactory: (() -> VisibleTileCoordinator)? = null
 ) {
+    private val appContext: Context = context.applicationContext ?: context
+
     var maplibreMap: MapLibreMap? = null
         private set
 
@@ -94,7 +97,9 @@ class MapEngineController(
     var onRouteTapped: ((routeId: String) -> Unit)? = null
     var onHighlightedPoiTapped: (() -> Unit)? = null
 
-    val visibleTileCoordinator = VisibleTileCoordinator(context)
+    val visibleTileCoordinator: VisibleTileCoordinator by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        visibleTileCoordinatorFactory?.invoke() ?: VisibleTileCoordinator(appContext)
+    }
 
     companion object {
         const val HIGHLIGHT_SOURCE_ID = "vian-selected-highlight-source"

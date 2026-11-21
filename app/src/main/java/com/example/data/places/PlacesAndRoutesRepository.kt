@@ -170,9 +170,11 @@ object RouteGeometryCodec {
  * Distinct from downloaded OSM POIs (`osm_pois`) and disposable tile caches;
  * all mutating and read queries run off the main thread.
  */
-class PlacesAndRoutesRepository(context: Context) {
+class PlacesAndRoutesRepository(
+    context: Context,
+    private val db: AppDatabase = AppDatabase.getInstance(context.applicationContext ?: context)
+) {
 
-    private val db = AppDatabase.getInstance(context)
     private val placeDao = db.userPlaceDao()
     private val routeDao = db.savedRouteDao()
 

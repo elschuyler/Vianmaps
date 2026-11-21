@@ -55,32 +55,44 @@ class NetworkDiagnosticsMonitor(context: Context) {
         }
     }
 
+    private val lock = Any()
+    @Volatile
+    private var isRegistered = false
+
     init {
-        try {
-            val request = NetworkRequest.Builder()
-                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                .build()
-            connectivityManager?.registerNetworkCallback(request, networkCallback)
+        ensureRegistered()
+    }
 
-            // Initial snapshot
-            val active = connectivityManager?.activeNetwork
-            val caps = connectivityManager?.getNetworkCapabilities(active)
-            val isOnline = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
-            _isDeviceOnline.value = isOnline
-            _connectionType.value = active?.let { detectType(it) } ?: "NONE"
+    fun ensureRegistered() {
+        synchronized(lock) {
+            if (isRegistered) return
+            try {
+                val request = NetworkRequest.Builder()
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    .build()
+                connectivityManager?.registerNetworkCallback(request, networkCallback)
+                isRegistered = true
 
-            DiagnosticRepository.log(
-                severity = LogSeverity.INFO,
-                source = "NetworkMonitor",
-                description = "Initial network state: ${if (isOnline) "ONLINE (${_connectionType.value})" else "OFFLINE"}"
-            )
-        } catch (e: Exception) {
-            DiagnosticRepository.log(
-                severity = LogSeverity.ERROR,
-                source = "NetworkMonitor",
-                description = "Failed to register network callback",
-                throwable = e
-            )
+                // Initial snapshot
+                val active = connectivityManager?.activeNetwork
+                val caps = connectivityManager?.getNetworkCapabilities(active)
+                val isOnline = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+                _isDeviceOnline.value = isOnline
+                _connectionType.value = active?.let { detectType(it) } ?: "NONE"
+
+                DiagnosticRepository.log(
+                    severity = LogSeverity.INFO,
+                    source = "NetworkMonitor",
+                    description = "Initial network state: ${if (isOnline) "ONLINE (${_connectionType.value})" else "OFFLINE"}"
+                )
+            } catch (e: Exception) {
+                DiagnosticRepository.log(
+                    severity = LogSeverity.ERROR,
+                    source = "NetworkMonitor",
+                    description = "Failed to register network callback",
+                    throwable = e
+                )
+            }
         }
     }
 
@@ -95,8 +107,14 @@ class NetworkDiagnosticsMonitor(context: Context) {
     }
 
     fun unregister() {
-        try {
-            connectivityManager?.unregisterNetworkCallback(networkCallback)
-        } catch (_: Exception) {}
+        synchronized(lock) {
+            if (!isRegistered) return
+            try {
+                connectivityManager?.unregisterNetworkCallback(networkCallback)
+            } catch (_: Exception) {
+            } finally {
+                isRegistered = false
+            }
+        }
     }
 }

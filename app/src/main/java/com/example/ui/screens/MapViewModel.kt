@@ -3,11 +3,11 @@ package com.example.ui.screens
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.example.data.preferences.AppPreferencesRepository
 import com.example.data.preferences.MapCameraState
 import com.example.diagnostics.DiagnosticRepository
 import com.example.diagnostics.LogSeverity
 import com.example.diagnostics.NetworkDiagnosticsMonitor
+import com.example.map.activation.MapRuntimeDependencies
 import com.example.map.source.MapSourceRepository
 import com.example.map.source.MapStyleDefinition
 import com.example.network.AppNetworkPolicy
@@ -24,19 +24,15 @@ import com.example.data.area.AreaDataProvenance
 import com.example.data.area.AreaDetailsRepository
 import com.example.data.area.AreaDetailsResult
 import com.example.data.area.AreaRemoteLookupGateway
-import com.example.data.db.AppDatabase
 import com.example.data.db.OsmPoiRecord
 import com.example.data.db.SavedAreaEntity
 import com.example.data.db.UserPlaceEntity
-import com.example.data.osm.OsmOfflineDataRepository
 import com.example.data.places.CreatePlaceOutcome
-import com.example.data.places.PlacesAndRoutesRepository
 import com.example.data.places.RouteGeometryCodec
 import com.example.data.places.RoutePoint
 import com.example.data.places.RouteWaypointDraft
 import com.example.data.places.SavedRouteModel
 import com.example.data.storage.OverallStorageReport
-import com.example.data.storage.StorageCalculationManager
 import com.example.map.composition.MapComposition
 import com.example.map.composition.MapCompositionDefaults
 import kotlinx.coroutines.CancellationException
@@ -139,25 +135,49 @@ sealed interface ActiveModal {
     data class PlaceholderTool(val name: String, val description: String) : ActiveModal
 }
 
-class MapViewModel(application: Application) : AndroidViewModel(application) {
+class MapViewModel(
+    application: Application,
+    private val dependencies: MapRuntimeDependencies = MapRuntimeDependencies(application)
+) : AndroidViewModel(application) {
 
-    private val preferencesRepository = AppPreferencesRepository(application)
-    private val osmRepository = OsmOfflineDataRepository(application)
-    private val placesRepository = PlacesAndRoutesRepository(application)
-    private var areaRepository = AreaDetailsRepository(application)
-    val networkMonitor = NetworkDiagnosticsMonitor(application)
+    private val preferencesRepository = dependencies.preferencesRepository
+    private val osmRepository = dependencies.osmRepository
+    private val placesRepository = dependencies.placesRepository
+    private var areaRepository = dependencies.areaRepository
+    private val storageService = dependencies.storageService
+    val networkMonitor: NetworkDiagnosticsMonitor = dependencies.networkMonitor
 
     private var searchJob: Job? = null
     private var areaLookupJob: Job? = null
     private var contextLookupJob: Job? = null
     private var onlineOverrideForTesting: Boolean? = null
 
+    fun createMapEngineController(
+        initialLat: Double,
+        initialLng: Double,
+        initialZoom: Double,
+        initialBearing: Double,
+        onCameraMoved: (lat: Double, lng: Double, zoom: Double, bearing: Double) -> Unit
+    ): MapEngineController {
+        return dependencies.createEngineController(
+            initialLat = initialLat,
+            initialLng = initialLng,
+            initialZoom = initialZoom,
+            initialBearing = initialBearing,
+            onCameraMoved = onCameraMoved
+        )
+    }
+
     internal fun configureAreaTesting(
         gateway: AreaRemoteLookupGateway? = null,
         onlineOverride: Boolean? = null
     ) {
         if (gateway != null) {
-            areaRepository = AreaDetailsRepository(getApplication(), gateway)
+            areaRepository = AreaDetailsRepository(
+                context = dependencies.appContext,
+                remoteGateway = gateway,
+                db = dependencies.database
+            )
         }
         onlineOverrideForTesting = onlineOverride
     }
@@ -171,6 +191,8 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
     val uiState: StateFlow<MapUiState> = _uiState.asStateFlow()
 
     init {
+        networkMonitor.ensureRegistered()
+
         DiagnosticRepository.log(
             severity = LogSeverity.INFO,
             source = "MapViewModel",
@@ -200,7 +222,7 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         viewModelScope.launch {
-            AppDatabase.getInstance(getApplication()).savedAreaDao().observeSavedAreas().collect { areas ->
+            areaRepository.observeSavedAreas().collect { areas ->
                 _uiState.value = _uiState.value.copy(savedAreas = areas)
             }
         }
@@ -499,8 +521,7 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.value = _uiState.value.copy(isCalculatingStorage = true)
         viewModelScope.launch {
             try {
-                val db = AppDatabase.getInstance(getApplication())
-                val report = StorageCalculationManager.calculateStorage(getApplication(), db)
+                val report = storageService.calculateStorageReport()
                 _uiState.value = _uiState.value.copy(
                     storageReport = report,
                     isCalculatingStorage = false
@@ -514,8 +535,7 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
     fun clearProviderCache(providerId: String) {
         viewModelScope.launch {
             try {
-                val db = AppDatabase.getInstance(getApplication())
-                val result = StorageCalculationManager.clearProviderTiles(getApplication(), db, providerId)
+                val result = storageService.clearProviderCache(providerId)
                 DiagnosticRepository.log(
                     severity = if (result.isSuccess) LogSeverity.INFO else LogSeverity.WARNING,
                     source = "StorageCalculationManager",
