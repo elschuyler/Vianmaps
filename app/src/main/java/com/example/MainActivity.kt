@@ -9,20 +9,16 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
-import androidx.activity.viewModels
 import com.example.diagnostics.GlobalErrorCatcher
 import com.example.diagnostics.DiagnosticRepository
 import com.example.diagnostics.LogSeverity
-import com.example.network.AppNetworkPolicy
-import com.example.ui.screens.MainMapScreen
-import com.example.ui.screens.MapViewModel
+import com.example.map.activation.MapActivationBoundary
+import com.example.map.activation.MapFeatureActivation
 import com.example.ui.theme.MyApplicationTheme
-import org.maplibre.android.MapLibre
-import org.maplibre.android.offline.OfflineManager
 
 class MainActivity : ComponentActivity() {
 
-    private val mapViewModel: MapViewModel by viewModels()
+    private val mapFeature: MapActivationBoundary = MapFeatureActivation
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -39,58 +35,8 @@ class MainActivity : ComponentActivity() {
         // Device hardware and graphics capability diagnostic audit
         logDeviceHardwareDiagnostics()
 
-        // Stage 1: MapLibre initialization started
-        DiagnosticRepository.log(
-            severity = LogSeverity.INFO,
-            source = "MainActivity",
-            description = "MapLibre initialization started",
-            stage = "INIT_START"
-        )
-
-        // Initialize MapLibre Native before View hierarchy is created
-        MapLibre.getInstance(this)
-
-        // Stage 2: MapLibre initialization completed
-        DiagnosticRepository.log(
-            severity = LogSeverity.INFO,
-            source = "MainActivity",
-            description = "MapLibre initialization completed (version: 13.7.1)",
-            stage = "INIT_COMPLETE"
-        )
-
-        // Configure ambient cache size to 500 MB (SDK default is only 50 MB)
-        try {
-            val offlineManager = OfflineManager.getInstance(this)
-            offlineManager.setMaximumAmbientCacheSize(500L * 1024L * 1024L, object : OfflineManager.FileSourceCallback {
-                override fun onSuccess() {
-                    DiagnosticRepository.log(
-                        severity = LogSeverity.INFO,
-                        source = "MainActivity",
-                        description = "MapLibre ambient cache size enlarged to 500 MB",
-                        stage = "CACHE_CONFIG"
-                    )
-                }
-
-                override fun onError(message: String) {
-                    DiagnosticRepository.log(
-                        severity = LogSeverity.WARNING,
-                        source = "MainActivity",
-                        description = "Failed to enlarge ambient cache size: $message",
-                        stage = "CACHE_CONFIG"
-                    )
-                }
-            })
-        } catch (e: Throwable) {
-            DiagnosticRepository.log(
-                severity = LogSeverity.WARNING,
-                source = "MainActivity",
-                description = "OfflineManager ambient cache setup exception: ${e.message}",
-                throwable = e
-            )
-        }
-
-        // Synchronize in-app network policy state to MapLibre core
-        MapLibre.setConnected(AppNetworkPolicy.isNetworkAllowed())
+        // Explicitly request Map activation through the host-facing activation seam
+        mapFeature.activate(this)
 
         // Force light status bar appearance (dark icons) so system bar icons remain readable
         enableEdgeToEdge(
@@ -102,7 +48,7 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             MyApplicationTheme {
-                MainMapScreen(viewModel = mapViewModel)
+                mapFeature.Content()
             }
         }
     }

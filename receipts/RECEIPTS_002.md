@@ -348,3 +348,24 @@ This file series is the project's permanent audit trail across sessions. Each fi
 * **Deviations from request**: None. Left pre-existing Phase 3 `VisibleTileCoordinator.kt` User-Agent untouched per scope boundary (zero `Area` lookup code retains placeholder or hardcoded personal contacts).
 * **Known issues / follow-up**: Remaining infrastructure required for enabling public Nominatim in production: (1) configured non-placeholder project contact address, (2) central application-wide proxy/rate-limiter enforcing <=1 req/s globally across all clients, and (3) optional remote config backend if over-the-air provider switching without an app update is desired. Real-world device verification remains manual.
 
+---
+
+### Entry 2026-11-20T20:33:20Z — Phase 1 (Pre-work) Stage 1: Map Activation Seam
+* **Summary**: Introduce a minimal host-facing Map activation seam (`MapActivationBoundary`) isolating MapLibre/OfflineManager initialization and lazy `MapViewModel`/`MainMapScreen` construction from `MainActivity` with zero UI or Room schema changes.
+* **Exact files touched**:
+  - `app/src/main/java/com/example/map/activation/MapActivationSeam.kt` (created `MapActivationState`, `MapActivationResult`, `MapActivationBoundary`, `MapRuntimeInitializer`, `DefaultMapRuntimeInitializer`, `MapActivationCoordinator`, and `MapFeatureActivation`)
+  - `app/src/main/java/com/example/MainActivity.kt` (removed direct `MapLibre`, `OfflineManager`, `AppNetworkPolicy`, `MapViewModel`, and `MainMapScreen` dependencies; wired `mapFeature.activate(this)` and `mapFeature.Content()`)
+  - `app/src/test/java/com/example/MapActivationSeamTest.kt` (created 5 JVM/Robolectric tests verifying pre-activation inactivity, single activation with `applicationContext`, repeated/concurrent activation idempotency, observable failure + lazy Map content blocking, host field decoupling, and Room v3 preservation)
+  - `receipts/RECEIPTS_002.md` (appended Stage 1 audit entry)
+* **What was actually done**:
+  - Moved `MapLibre.getInstance(appContext)`, `OfflineManager.getInstance(appContext).setMaximumAmbientCacheSize(500 MB, ...)`, and `MapLibre.setConnected(AppNetworkPolicy.isNetworkAllowed())` out of `MainActivity.onCreate` into `DefaultMapRuntimeInitializer` behind `MapActivationCoordinator`.
+  - Gated Compose `viewModel<MapViewModel>()` and `MainMapScreen(...)` inside `MapActivationCoordinator.Content` behind `MapActivationState.Active` so `MapViewModel`, `NetworkDiagnosticsMonitor`, `AppPreferencesRepository`, Room repositories, `MapEngineController`, `MapView`, and `VisibleTileCoordinator` remain unconstructed while `Inactive`, `Activating`, or `Failed`.
+  - Added `synchronized` double-checked once-per-process guard returning `AlreadyActive` on repeat/concurrent calls and surfacing `Throwable` failures via `MapActivationState.Failed`, `MapActivationResult.Failed`, and `DiagnosticRepository` (`MAP_ACTIVATION_FAILED`).
+  - Left `MainMapScreen.kt`, `MapEngineController.kt`, `MapViewModel.kt`, `AppDatabase.kt`, `AppDatabaseContract.kt`, `BLUEPRINT.md`, and all UI components untouched.
+* **How it was verified**:
+  - Local JVM/Robolectric unit tests (`gradle :app:testDebugUnitTest --console=plain`): `TEST-com.example.ExampleUnitTest.xml` reported 65/65 passed (`skipped="0"`, `failures="0"`, `errors="0"`) and `TEST-com.example.MapActivationSeamTest.xml` reported 5/5 passed (`skipped="0"`, `failures="0"`, `errors="0"`) — 70/70 passed total. Native MapLibre SDK initialization in `MapActivationSeamTest` was tested using a fake `MapRuntimeInitializer` seam (native `libmaplibre.so` cannot execute on Linux JVM).
+  - Container applet compilation (`compile_applet`): Build succeeded.
+  - On-device verification: Not tested on physical Android hardware or streaming emulator in this container (no emulator/ADB available).
+* **Deviations from request**: None (`BLUEPRINT.md` was intentionally left untouched per Stage 1's "Do NOT implement or begin: ... Blueprint rewriting" constraint).
+* **Known issues / follow-up**: Native `DefaultMapRuntimeInitializer` (`MapLibre.getInstance`, `OfflineManager`, `MapLibre.setConnected`) and full `MainActivity` launch into `MainMapScreen` require manual on-device QA on Android hardware. Stop at Stage 1 pending explicit approval for Stage 2.
+
