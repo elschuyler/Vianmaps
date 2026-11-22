@@ -6,6 +6,7 @@ import android.graphics.RectF
 import com.example.data.db.OsmPoiRecord
 import com.example.data.db.UserPlaceEntity
 import com.example.data.osm.CategoryHighlightedPoi
+import com.example.data.osm.PoiCategoryHighlightDefaults
 import com.example.data.osm.PoiLatLngCorner
 import com.example.data.osm.PoiViewportBounds
 import com.example.data.places.RoutePoint
@@ -1112,23 +1113,28 @@ class MapEngineController(
     private fun applyCategoryPoiHighlightsToStyle(style: Style) {
         try {
             val shouldShow = isCategoryHighlightVisible && currentCategoryHighlightedPois.isNotEmpty()
-            val features = if (shouldShow) {
+            val dedupedPois = if (shouldShow) {
                 currentCategoryHighlightedPois
                     .distinctBy { it.poi.osmId }
                     .filter { RoutePoint(it.poi.latitude, it.poi.longitude).isValid() }
-                    .map { item ->
-                        Feature.fromGeometry(
-                            Point.fromLngLat(item.poi.longitude, item.poi.latitude)
-                        ).apply {
-                            addNumberProperty("osmId", item.poi.osmId)
-                            addStringProperty("name", item.poi.name)
-                            addStringProperty("categoryId", item.primaryCategory.id)
-                            addStringProperty("categoryLabel", item.primaryCategory.displayName)
-                            addStringProperty("markerColor", item.primaryCategory.markerColorHex)
-                        }
-                    }
             } else {
                 emptyList()
+            }
+            val isAllPoisNeutral = dedupedPois.isNotEmpty() &&
+                dedupedPois.all { it.categoryId == PoiCategoryHighlightDefaults.ALL_POIS_PILL_ID }
+            val isDenseAllPois = isAllPoisNeutral &&
+                dedupedPois.size > PoiCategoryHighlightDefaults.ALL_POIS_DENSE_THRESHOLD
+
+            val features = dedupedPois.map { item ->
+                Feature.fromGeometry(
+                    Point.fromLngLat(item.poi.longitude, item.poi.latitude)
+                ).apply {
+                    addNumberProperty("osmId", item.poi.osmId)
+                    addStringProperty("name", item.poi.name)
+                    addStringProperty("categoryId", item.categoryId)
+                    addStringProperty("categoryLabel", item.categoryLabel)
+                    addStringProperty("markerColor", item.markerColorHex)
+                }
             }
             val collection = FeatureCollection.fromFeatures(features)
             val existingSource = style.getSourceAs<GeoJsonSource>(CATEGORY_HIGHLIGHT_SOURCE_ID)
@@ -1139,14 +1145,22 @@ class MapEngineController(
             }
 
             val visibilityValue = if (shouldShow) Property.VISIBLE else Property.NONE
+            val haloRadius = if (isDenseAllPois) 7.5f else 10.5f
+            val haloColor = if (isAllPoisNeutral) "#B3F1F5F9" else "#CCFFFFFF"
+            val coreRadius = if (isDenseAllPois) 4.8f else 6.5f
+            val coreStrokeWidth = if (isDenseAllPois) 1.5f else 2.0f
 
             val existingHalo = style.getLayer(CATEGORY_HIGHLIGHT_HALO_LAYER_ID)
             if (existingHalo != null) {
-                existingHalo.setProperties(PropertyFactory.visibility(visibilityValue))
+                existingHalo.setProperties(
+                    PropertyFactory.circleRadius(haloRadius),
+                    PropertyFactory.circleColor(haloColor),
+                    PropertyFactory.visibility(visibilityValue)
+                )
             } else {
                 val haloLayer = CircleLayer(CATEGORY_HIGHLIGHT_HALO_LAYER_ID, CATEGORY_HIGHLIGHT_SOURCE_ID).withProperties(
-                    PropertyFactory.circleRadius(10.5f),
-                    PropertyFactory.circleColor("#CCFFFFFF"),
+                    PropertyFactory.circleRadius(haloRadius),
+                    PropertyFactory.circleColor(haloColor),
                     PropertyFactory.circleStrokeWidth(1.5f),
                     PropertyFactory.circleStrokeColor(Expression.get("markerColor")),
                     PropertyFactory.visibility(visibilityValue)
@@ -1156,12 +1170,16 @@ class MapEngineController(
 
             val existingCore = style.getLayer(CATEGORY_HIGHLIGHT_CORE_LAYER_ID)
             if (existingCore != null) {
-                existingCore.setProperties(PropertyFactory.visibility(visibilityValue))
+                existingCore.setProperties(
+                    PropertyFactory.circleRadius(coreRadius),
+                    PropertyFactory.circleStrokeWidth(coreStrokeWidth),
+                    PropertyFactory.visibility(visibilityValue)
+                )
             } else {
                 val coreLayer = CircleLayer(CATEGORY_HIGHLIGHT_CORE_LAYER_ID, CATEGORY_HIGHLIGHT_SOURCE_ID).withProperties(
-                    PropertyFactory.circleRadius(6.5f),
+                    PropertyFactory.circleRadius(coreRadius),
                     PropertyFactory.circleColor(Expression.get("markerColor")),
-                    PropertyFactory.circleStrokeWidth(2f),
+                    PropertyFactory.circleStrokeWidth(coreStrokeWidth),
                     PropertyFactory.circleStrokeColor("#FFFFFF"),
                     PropertyFactory.visibility(visibilityValue)
                 )

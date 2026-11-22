@@ -838,6 +838,9 @@ fun MainMapScreen(
                 onToggleHighlightCategory = { categoryId ->
                     viewModel.toggleHighlightCategory(categoryId, controller)
                 },
+                onToggleAllPoisHighlight = {
+                    viewModel.toggleAllPoisHighlight(controller)
+                },
                 onClearAllHighlightCategories = {
                     viewModel.clearAllHighlightCategories(controller)
                 },

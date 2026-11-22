@@ -423,3 +423,27 @@ This file series is the project's permanent audit trail across sessions. Each fi
   - On-device verification: Not tested on physical Android hardware or streaming emulator in this container (no emulator/ADB available).
 * **Deviations from request**: None.
 * **Known issues / follow-up**: Manual on-device QA required for MapLibre GL camera idle events, circle rendering under dense POIs/different styles, and z13.0 pause threshold tuning. Bank-embedded `atm=yes` features remain unavailable in OpenFreeMap MVT `poi` tiles (`z<=14`).
+
+---
+
+### Entry 2026-11-22T20:03:00Z — Phase 4.3.1: Extend Category-Based POI Highlighting
+* **Summary**: Update Tools -> Highlight POIs to 12 categories (remove Cafe/Parking; add Church/Worship, Bank, Copy Shop) and add a mutually exclusive, bounded neutral `All POIs` mode with honest total vs displayed count feedback.
+* **Exact files touched**:
+  - `app/src/main/java/com/example/data/osm/PoiCategoryHighlight.kt` (removed `CAFE`/`PARKING`, added `CHURCH_WORSHIP`/`BANK`/`COPY_SHOP`, added `pickPrimaryCategory`, `ViewportPoiHighlightQueryResult`, and `All POIs` constants `#64748B`, limit `750`, dense threshold `120`)
+  - `app/src/main/java/com/example/data/db/AppDatabase.kt` (added `TRIM()` normalization in `getPoisByCategoryTokensInBounds` plus `getAllPoisInBounds` and `countPoisInBounds`; kept DB v3 untouched)
+  - `app/src/main/java/com/example/data/osm/OsmOfflineDataRepository.kt` (used `pickPrimaryCategory` and added antimeridian-safe `queryAllHighlightedPois` with exact `COUNT(*)` and `isTruncated`)
+  - `app/src/main/java/com/example/map/engine/MapEngineController.kt` (updated `applyCategoryPoiHighlightsToStyle` to render neutral `#64748B` markers and compact circle sizing above `120` neutral markers)
+  - `app/src/main/java/com/example/ui/screens/MapViewModel.kt` (added `isAllPoisSelected`, `totalMatchingCount`, `isDisplayTruncated`, `displayLimit`, `toggleAllPoisHighlight`, mutual exclusion, and shared debounce/cancellation/zoom/tile-refresh handling)
+  - `app/src/main/java/com/example/ui/components/PoiHighlightOverlays.kt`, `AppModalManager.kt`, `MainMapScreen.kt` (added `AllPoisHighlightPill`, honest count/truncation notices, updated 12-pill accents, wired `onToggleAllPois`)
+  - `app/src/test/java/com/example/PoiCategoryHighlightTest.kt` (updated 8 JVM/Robolectric tests across all 13 requirements, including Compose `lastViewport` and scroll assertions in `test07`)
+  - `BLUEPRINT.md` & `receipts/RECEIPTS_002.md` (updated Phase 4.3.1 records)
+* **What was actually done**:
+  - Removed `Cafe` and `Parking` pills; added `Church / Worship` (`place_of_worship` excluding `tourism`/`historic`/`monument`/`pilgrimage` tags), `Bank` (`amenity=bank`, separate from standalone `ATM`), and `Copy Shop` (`shop=copyshop`, excluding generic shops).
+  - Added mutually exclusive `All POIs` pill highlighting all locally stored viewport POIs (including uncategorized rows) in neutral `#64748B` slate, backed by `COUNT(*)` + capped `LIMIT 750` Room queries with explicit `Showing X of Y` truncation feedback and dense-cluster dot sizing above `120` markers.
+* **How it was verified**:
+  - Local JVM/Robolectric unit tests (`JAVA_TOOL_OPTIONS="-Drobolectric.offline=true -Drobolectric.dependency.dir=/home/appuser/.m2/repository/org/robolectric/android-all-instrumented/16-robolectric-13921718-i7" gradle :app:testDebugUnitTest --console=plain`): `TEST-com.example.ExampleUnitTest.xml` 65/65, `TEST-com.example.MapActivationSeamTest.xml` 10/10, `TEST-com.example.PoiCategoryHighlightTest.xml` 8/8 — 83/83 passed (`failures="0"`, `errors="0"`, `skipped="0"`).
+  - Container applet compilation (`compile_applet`): `Build succeeded - the applet is compiled`.
+  - On-device verification: Not tested on physical Android hardware or streaming emulator in this container (no emulator/ADB available).
+* **Deviations from request**: None.
+* **Known issues / follow-up**: Manual on-device QA required for dense `All POIs` neutral circle legibility, live MapLibre camera-idle/zoom transitions, and tile ingestion refresh. OpenMapTiles `poi` (`z<=14`) aggregates `place_of_worship` under `class`/`subclass` without guaranteed church/mosque/temple split and does not emit bank-nested `atm=yes` POIs separately from `bank`.
+

@@ -62,8 +62,12 @@ data class PoiSearchUiState(
 
 data class PoiCategoryHighlightUiState(
     val selectedCategoryIds: Set<String> = emptySet(),
+    val isAllPoisSelected: Boolean = false,
     val matchedPois: List<CategoryHighlightedPoi> = emptyList(),
     val categoryMatchCounts: Map<String, Int> = emptyMap(),
+    val totalMatchingCount: Int = 0,
+    val isDisplayTruncated: Boolean = false,
+    val displayLimit: Int? = null,
     val isRefreshing: Boolean = false,
     val hasQueriedViewport: Boolean = false,
     val isPausedByZoom: Boolean = false,
@@ -71,7 +75,10 @@ data class PoiCategoryHighlightUiState(
     val minHighlightZoom: Double = PoiCategoryHighlightDefaults.MIN_POI_HIGHLIGHT_ZOOM,
     val lastViewport: PoiViewportBounds? = null,
     val errorMessage: String? = null
-)
+) {
+    val hasActiveSelection: Boolean
+        get() = isAllPoisSelected || selectedCategoryIds.isNotEmpty()
+}
 
 data class PlacemarkEditorState(
     val editingPlaceId: String? = null,
@@ -609,10 +616,11 @@ class MapViewModel(
     ) {
         if (PoiHighlightCategory.fromId(categoryId) == null) return
         val current = _uiState.value.categoryHighlightState
-        val nextSelected = if (categoryId in current.selectedCategoryIds) {
-            current.selectedCategoryIds - categoryId
+        val baseSelected = if (current.isAllPoisSelected) emptySet() else current.selectedCategoryIds
+        val nextSelected = if (categoryId in baseSelected) {
+            baseSelected - categoryId
         } else {
-            current.selectedCategoryIds + categoryId
+            baseSelected + categoryId
         }
 
         if (nextSelected.isEmpty()) {
@@ -624,9 +632,55 @@ class MapViewModel(
         _uiState.value = _uiState.value.copy(
             categoryHighlightState = current.copy(
                 selectedCategoryIds = nextSelected,
+                isAllPoisSelected = false,
                 isPausedByZoom = paused,
-                matchedPois = if (paused) emptyList() else current.matchedPois,
-                categoryMatchCounts = if (paused) emptyMap() else current.categoryMatchCounts,
+                matchedPois = if (paused || current.isAllPoisSelected) emptyList() else current.matchedPois,
+                categoryMatchCounts = if (paused || current.isAllPoisSelected) emptyMap() else current.categoryMatchCounts,
+                totalMatchingCount = if (paused || current.isAllPoisSelected) 0 else current.totalMatchingCount,
+                isDisplayTruncated = false,
+                displayLimit = null,
+                isRefreshing = false,
+                errorMessage = null
+            )
+        )
+
+        if (paused) {
+            categoryHighlightJob?.cancel()
+            categoryQueryGeneration++
+            controller?.updateCategoryHighlightedPois(emptyList(), isVisible = false)
+            return
+        }
+
+        val viewport = current.lastViewport ?: return
+        scheduleCategoryViewportRefresh(
+            viewport = viewport,
+            zoom = current.currentZoom,
+            controller = controller,
+            debounceMs = debounceMs
+        )
+    }
+
+    fun toggleAllPoisHighlight(
+        controller: MapEngineController? = null,
+        debounceMs: Long = PoiCategoryHighlightDefaults.SELECTION_CHANGE_DEBOUNCE_MS
+    ) {
+        val current = _uiState.value.categoryHighlightState
+        if (current.isAllPoisSelected) {
+            clearAllHighlightCategories(controller)
+            return
+        }
+
+        val paused = current.currentZoom < current.minHighlightZoom
+        _uiState.value = _uiState.value.copy(
+            categoryHighlightState = current.copy(
+                selectedCategoryIds = emptySet(),
+                isAllPoisSelected = true,
+                isPausedByZoom = paused,
+                matchedPois = emptyList(),
+                categoryMatchCounts = emptyMap(),
+                totalMatchingCount = 0,
+                isDisplayTruncated = false,
+                displayLimit = null,
                 isRefreshing = false,
                 errorMessage = null
             )
@@ -655,8 +709,12 @@ class MapViewModel(
         _uiState.value = _uiState.value.copy(
             categoryHighlightState = current.copy(
                 selectedCategoryIds = emptySet(),
+                isAllPoisSelected = false,
                 matchedPois = emptyList(),
                 categoryMatchCounts = emptyMap(),
+                totalMatchingCount = 0,
+                isDisplayTruncated = false,
+                displayLimit = null,
                 isRefreshing = false,
                 hasQueriedViewport = false,
                 isPausedByZoom = current.currentZoom < current.minHighlightZoom,
@@ -685,6 +743,9 @@ class MapViewModel(
                     isPausedByZoom = true,
                     matchedPois = emptyList(),
                     categoryMatchCounts = emptyMap(),
+                    totalMatchingCount = 0,
+                    isDisplayTruncated = false,
+                    displayLimit = null,
                     isRefreshing = false,
                     errorMessage = null
                 )
@@ -701,7 +762,7 @@ class MapViewModel(
             )
         )
 
-        if (current.selectedCategoryIds.isEmpty()) {
+        if (!current.hasActiveSelection) {
             return
         }
 
@@ -718,7 +779,7 @@ class MapViewModel(
         debounceMs: Long = PoiCategoryHighlightDefaults.TILE_INGESTION_COALESCE_MS
     ) {
         val current = _uiState.value.categoryHighlightState
-        if (current.selectedCategoryIds.isEmpty()) return
+        if (!current.hasActiveSelection) return
         if (current.isPausedByZoom || current.currentZoom < current.minHighlightZoom) return
         val viewport = current.lastViewport ?: return
 
@@ -745,13 +806,16 @@ class MapViewModel(
             )
         )
         val viewport = current.lastViewport
-        if (paused || current.selectedCategoryIds.isEmpty()) {
+        if (paused || !current.hasActiveSelection) {
             categoryHighlightJob?.cancel()
             categoryQueryGeneration++
             _uiState.value = _uiState.value.copy(
                 categoryHighlightState = _uiState.value.categoryHighlightState.copy(
                     matchedPois = emptyList(),
                     categoryMatchCounts = emptyMap(),
+                    totalMatchingCount = 0,
+                    isDisplayTruncated = false,
+                    displayLimit = null,
                     isRefreshing = false
                 )
             )
@@ -784,9 +848,50 @@ class MapViewModel(
 
                 val latestBeforeQuery = _uiState.value.categoryHighlightState
                 if (requestGeneration != categoryQueryGeneration ||
-                    latestBeforeQuery.selectedCategoryIds.isEmpty() ||
+                    !latestBeforeQuery.hasActiveSelection ||
                     latestBeforeQuery.currentZoom < latestBeforeQuery.minHighlightZoom
                 ) {
+                    return@launch
+                }
+
+                if (latestBeforeQuery.isAllPoisSelected) {
+                    _uiState.value = _uiState.value.copy(
+                        categoryHighlightState = latestBeforeQuery.copy(
+                            isRefreshing = true,
+                            errorMessage = null
+                        )
+                    )
+
+                    val result = osmRepository.queryAllHighlightedPois(bounds = viewport)
+                    ensureActive()
+
+                    val latestAfterQuery = _uiState.value.categoryHighlightState
+                    if (requestGeneration != categoryQueryGeneration ||
+                        !latestAfterQuery.isAllPoisSelected ||
+                        latestAfterQuery.currentZoom < latestAfterQuery.minHighlightZoom
+                    ) {
+                        return@launch
+                    }
+
+                    _uiState.value = _uiState.value.copy(
+                        categoryHighlightState = latestAfterQuery.copy(
+                            matchedPois = result.items,
+                            categoryMatchCounts = emptyMap(),
+                            totalMatchingCount = result.totalMatchingCount,
+                            isDisplayTruncated = result.isTruncated,
+                            displayLimit = result.displayLimit,
+                            isRefreshing = false,
+                            hasQueriedViewport = true,
+                            isPausedByZoom = false,
+                            currentZoom = zoom,
+                            lastViewport = viewport,
+                            errorMessage = null
+                        )
+                    )
+                    controller?.updateCategoryHighlightedPois(
+                        pois = result.items,
+                        isVisible = result.items.isNotEmpty()
+                    )
                     return@launch
                 }
 
@@ -810,6 +915,7 @@ class MapViewModel(
 
                 val latestAfterQuery = _uiState.value.categoryHighlightState
                 if (requestGeneration != categoryQueryGeneration ||
+                    latestAfterQuery.isAllPoisSelected ||
                     latestAfterQuery.selectedCategoryIds.isEmpty() ||
                     latestAfterQuery.currentZoom < latestAfterQuery.minHighlightZoom
                 ) {
@@ -827,6 +933,9 @@ class MapViewModel(
                     categoryHighlightState = latestAfterQuery.copy(
                         matchedPois = matches,
                         categoryMatchCounts = counts,
+                        totalMatchingCount = matches.size,
+                        isDisplayTruncated = false,
+                        displayLimit = null,
                         isRefreshing = false,
                         hasQueriedViewport = true,
                         isPausedByZoom = false,

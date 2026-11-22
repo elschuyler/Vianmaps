@@ -158,17 +158,73 @@ class OsmOfflineDataRepository(
         val highlighted = ArrayList<CategoryHighlightedPoi>(candidatesByOsmId.size)
         for (poi in candidatesByOsmId.values) {
             val matched = PoiHighlightCategory.matchSelectedCategories(poi, selectedCategories)
-            if (matched.isNotEmpty()) {
+            val primary = PoiHighlightCategory.pickPrimaryCategory(matched)
+            if (primary != null) {
                 highlighted.add(
                     CategoryHighlightedPoi(
                         poi = poi,
-                        primaryCategory = matched.first(),
+                        primaryCategory = primary,
                         matchedCategoryIds = matched.map { it.id }
                     )
                 )
             }
         }
         highlighted
+    }
+
+    suspend fun queryAllHighlightedPois(
+        bounds: PoiViewportBounds,
+        limit: Int = PoiCategoryHighlightDefaults.MAX_ALL_POIS_QUERY_LIMIT
+    ): ViewportPoiHighlightQueryResult = withContext(Dispatchers.IO) {
+        if (!bounds.isValid() || limit <= 0) {
+            return@withContext ViewportPoiHighlightQueryResult(emptyList(), 0)
+        }
+        val safeLimit = limit.coerceAtLeast(1)
+        val ranges = bounds.longitudeRanges()
+        val deduped = LinkedHashMap<Long, OsmPoiRecord>()
+        var totalMatchingCount = 0
+
+        for ((westLng, eastLng) in ranges) {
+            totalMatchingCount += poiDao.countPoisInBounds(
+                minLat = bounds.southLat,
+                maxLat = bounds.northLat,
+                minLng = westLng,
+                maxLng = eastLng
+            )
+            val slice = poiDao.getAllPoisInBounds(
+                minLat = bounds.southLat,
+                maxLat = bounds.northLat,
+                minLng = westLng,
+                maxLng = eastLng,
+                limit = safeLimit
+            )
+            for (poi in slice) {
+                deduped.putIfAbsent(poi.osmId, poi)
+            }
+        }
+
+        val items = deduped.values
+            .sortedBy { it.osmId }
+            .take(safeLimit)
+            .map { poi ->
+                CategoryHighlightedPoi(
+                    poi = poi,
+                    primaryCategory = null,
+                    matchedCategoryIds = emptyList(),
+                    markerColorHex = PoiCategoryHighlightDefaults.ALL_POIS_MARKER_COLOR_HEX,
+                    categoryId = PoiCategoryHighlightDefaults.ALL_POIS_PILL_ID,
+                    categoryLabel = "All POIs"
+                )
+            }
+
+        val effectiveTotal = maxOf(totalMatchingCount, items.size)
+        val truncated = effectiveTotal > items.size
+        ViewportPoiHighlightQueryResult(
+            items = items,
+            totalMatchingCount = effectiveTotal,
+            isTruncated = truncated,
+            displayLimit = if (truncated) safeLimit else null
+        )
     }
 
     suspend fun getPoiCount(): Int = withContext(Dispatchers.IO) { poiDao.getPoiCount() }

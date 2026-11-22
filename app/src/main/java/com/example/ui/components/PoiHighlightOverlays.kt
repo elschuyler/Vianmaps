@@ -237,10 +237,13 @@ fun SelectedPoiHighlightBanner(
 fun PoiHighlightPopupContent(
     highlightState: PoiCategoryHighlightUiState,
     onToggleCategory: (String) -> Unit,
+    onToggleAllPois: () -> Unit,
     onClearAll: () -> Unit,
     onClose: () -> Unit
 ) {
     val selectedCount = highlightState.selectedCategoryIds.size
+    val isAllPoisSelected = highlightState.isAllPoisSelected
+    val hasSelection = highlightState.hasActiveSelection
 
     Column(
         modifier = Modifier
@@ -264,8 +267,13 @@ fun PoiHighlightPopupContent(
                     color = SkyBlueLight,
                     shape = RoundedCornerShape(4.dp)
                 ) {
+                    val headerBadge = when {
+                        isAllPoisSelected -> "All POIs"
+                        selectedCount > 0 -> "$selectedCount Active"
+                        else -> "Viewport"
+                    }
                     Text(
-                        text = if (selectedCount > 0) "$selectedCount Active" else "Viewport",
+                        text = headerBadge,
                         fontSize = 9.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = SkyBlueDim,
@@ -299,9 +307,9 @@ fun PoiHighlightPopupContent(
             )
         }
 
-        // Honest live status card (zoom pause / empty viewport / active count / prompt)
-        val isZoomPaused = selectedCount > 0 && highlightState.isPausedByZoom
-        val isEmptyViewport = selectedCount > 0 &&
+        // Honest live status card (zoom pause / empty viewport / truncated cap / active count / prompt)
+        val isZoomPaused = hasSelection && highlightState.isPausedByZoom
+        val isEmptyViewport = hasSelection &&
             !highlightState.isPausedByZoom &&
             !highlightState.isRefreshing &&
             highlightState.hasQueriedViewport &&
@@ -310,13 +318,15 @@ fun PoiHighlightPopupContent(
         val statusBackground = when {
             highlightState.errorMessage != null -> IndicatorAlert.copy(alpha = 0.08f)
             isZoomPaused -> Color(0xFFFEF3C7)
-            selectedCount > 0 && highlightState.matchedPois.isNotEmpty() -> SkyBlueLight
+            hasSelection && highlightState.isDisplayTruncated -> Color(0xFFF1F5F9)
+            hasSelection && highlightState.matchedPois.isNotEmpty() -> SkyBlueLight
             else -> SurfaceOffWhite
         }
         val statusBorder = when {
             highlightState.errorMessage != null -> IndicatorAlert.copy(alpha = 0.35f)
             isZoomPaused -> Color(0xFFF59E0B).copy(alpha = 0.45f)
-            selectedCount > 0 && highlightState.matchedPois.isNotEmpty() -> SkyBlueBorder
+            hasSelection && highlightState.isDisplayTruncated -> Color(0xFF64748B).copy(alpha = 0.45f)
+            hasSelection && highlightState.matchedPois.isNotEmpty() -> SkyBlueBorder
             else -> SurfaceBorderLight
         }
 
@@ -348,15 +358,19 @@ fun PoiHighlightPopupContent(
                     )
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(
-                        text = "$selectedCount selected categor${if (selectedCount == 1) "y remains" else "ies remain"} active and will highlight automatically when you zoom in.",
+                        text = if (isAllPoisSelected) {
+                            "All POIs mode remains active and will highlight automatically when you zoom in."
+                        } else {
+                            "$selectedCount selected categor${if (selectedCount == 1) "y remains" else "ies remain"} active and will highlight automatically when you zoom in."
+                        },
                         fontSize = 10.sp,
                         color = Color(0xFF78350F),
                         lineHeight = 13.sp
                     )
                 }
-                selectedCount == 0 -> {
+                !hasSelection -> {
                     Text(
-                        text = "Select categories below to highlight matching local POIs inside the current map view.",
+                        text = "Select All POIs or categories below to highlight matching local POIs inside the current map view.",
                         fontSize = 11.sp,
                         color = TextDarkSecondary,
                         lineHeight = 14.sp
@@ -364,7 +378,11 @@ fun PoiHighlightPopupContent(
                 }
                 highlightState.lastViewport == null -> {
                     Text(
-                        text = "$selectedCount categor${if (selectedCount == 1) "y" else "ies"} active. Waiting for map viewport bounds.",
+                        text = if (isAllPoisSelected) {
+                            "All POIs active. Waiting for map viewport bounds."
+                        } else {
+                            "$selectedCount categor${if (selectedCount == 1) "y" else "ies"} active. Waiting for map viewport bounds."
+                        },
                         fontSize = 11.sp,
                         color = TextDarkSecondary,
                         lineHeight = 14.sp
@@ -386,10 +404,30 @@ fun PoiHighlightPopupContent(
                         lineHeight = 13.sp
                     )
                 }
+                highlightState.isDisplayTruncated -> {
+                    val shown = highlightState.matchedPois.size
+                    val total = highlightState.totalMatchingCount
+                    val cap = highlightState.displayLimit ?: shown
+                    Text(
+                        text = "Showing $shown of $total local POIs in viewport (display limit $cap)",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = TextDarkPrimary,
+                        modifier = Modifier.testTag("highlight_match_count")
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = "Zoom in to inspect all $total locally stored POIs cleanly without map clutter.",
+                        fontSize = 10.sp,
+                        color = TextDarkSecondary,
+                        lineHeight = 13.sp
+                    )
+                }
                 else -> {
                     val count = highlightState.matchedPois.size
+                    val modeSuffix = if (isAllPoisSelected) " (All POIs)" else ""
                     Text(
-                        text = "Highlighting $count visible local POI${if (count == 1) "" else "s"}",
+                        text = "Highlighting $count visible local POI${if (count == 1) "" else "s"}$modeSuffix",
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
                         color = SkyBlueDim,
@@ -401,7 +439,7 @@ fun PoiHighlightPopupContent(
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // Scrollable multi-select category pill container
+        // Scrollable multi-select category pill container + mutually exclusive All POIs pill
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -413,8 +451,27 @@ fun PoiHighlightPopupContent(
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
+                val allPoisBadgeText = if (
+                    isAllPoisSelected &&
+                    !isZoomPaused &&
+                    highlightState.hasQueriedViewport
+                ) {
+                    if (highlightState.isDisplayTruncated) {
+                        "${highlightState.matchedPois.size}/${highlightState.totalMatchingCount}"
+                    } else {
+                        "${highlightState.totalMatchingCount}"
+                    }
+                } else {
+                    null
+                }
+                AllPoisHighlightPill(
+                    isSelected = isAllPoisSelected,
+                    badgeText = allPoisBadgeText,
+                    onClick = onToggleAllPois
+                )
+
                 for (category in PoiHighlightCategory.entries) {
-                    val isSelected = category.id in highlightState.selectedCategoryIds
+                    val isSelected = !isAllPoisSelected && (category.id in highlightState.selectedCategoryIds)
                     val count = highlightState.categoryMatchCounts[category.id]
                     val showCount = isSelected && !isZoomPaused && highlightState.hasQueriedViewport && count != null
                     CategoryHighlightPill(
@@ -436,7 +493,7 @@ fun PoiHighlightPopupContent(
         ) {
             OutlinedButton(
                 onClick = onClearAll,
-                enabled = selectedCount > 0,
+                enabled = hasSelection,
                 shape = RoundedCornerShape(10.dp),
                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
                 modifier = Modifier
@@ -447,7 +504,7 @@ fun PoiHighlightPopupContent(
                 Icon(
                     imageVector = Icons.Default.DeleteOutline,
                     contentDescription = null,
-                    tint = if (selectedCount > 0) TextDarkPrimary else TextDarkMuted,
+                    tint = if (hasSelection) TextDarkPrimary else TextDarkMuted,
                     modifier = Modifier.size(15.dp)
                 )
                 Spacer(modifier = Modifier.width(4.dp))
@@ -455,7 +512,7 @@ fun PoiHighlightPopupContent(
                     text = "Clear All",
                     fontSize = 11.sp,
                     fontWeight = FontWeight.SemiBold,
-                    color = if (selectedCount > 0) TextDarkPrimary else TextDarkMuted
+                    color = if (hasSelection) TextDarkPrimary else TextDarkMuted
                 )
             }
 
@@ -482,11 +539,63 @@ fun PoiHighlightPopupContent(
 
         Spacer(modifier = Modifier.height(5.dp))
         Text(
-            text = "Uses local OSM vector tile POI classes/subclasses (z<=14 cache). Standalone ATMs only; bank-nested ATMs are not separated in tiles.",
+            text = "Queries locally retained OSM vector tile POIs only (z<=14 cache, not a complete live directory). Worship uses place_of_worship; standalone ATMs only.",
             fontSize = 9.5.sp,
             color = TextDarkMuted,
             lineHeight = 12.sp
         )
+    }
+}
+
+@Composable
+private fun AllPoisHighlightPill(
+    isSelected: Boolean,
+    badgeText: String?,
+    onClick: () -> Unit
+) {
+    val neutralAccent = Color(0xFF64748B)
+    val pillShape = RoundedCornerShape(20.dp)
+    val labelText = if (badgeText != null) "All POIs ($badgeText)" else "All POIs"
+
+    Row(
+        modifier = Modifier
+            .minimumInteractiveComponentSize()
+            .clip(pillShape)
+            .background(if (isSelected) neutralAccent.copy(alpha = 0.14f) else SurfaceOffWhite)
+            .border(
+                width = if (isSelected) 1.5.dp else 1.dp,
+                color = if (isSelected) neutralAccent else SurfaceBorderLight,
+                shape = pillShape
+            )
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 7.dp)
+            .testTag("highlight_all_pois_pill"),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(9.dp)
+                .clip(CircleShape)
+                .background(neutralAccent)
+        )
+        Spacer(modifier = Modifier.width(6.dp))
+        Text(
+            text = labelText,
+            fontSize = 11.5.sp,
+            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+            color = if (isSelected) TextDarkPrimary else TextDarkSecondary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        if (isSelected) {
+            Spacer(modifier = Modifier.width(4.dp))
+            Icon(
+                imageVector = Icons.Default.Check,
+                contentDescription = "All POIs selected",
+                tint = neutralAccent,
+                modifier = Modifier.size(13.dp)
+            )
+        }
     }
 }
 
@@ -548,14 +657,15 @@ private fun categoryAccentColor(category: PoiHighlightCategory): Color {
         PoiHighlightCategory.SHOP -> Color(0xFF6366F1)
         PoiHighlightCategory.GROCERY -> Color(0xFF10B981)
         PoiHighlightCategory.RESTAURANT -> Color(0xFFF59E0B)
-        PoiHighlightCategory.CAFE -> Color(0xFF14B8A6)
         PoiHighlightCategory.PHARMACY -> Color(0xFFF43F5E)
         PoiHighlightCategory.HOSPITAL -> Color(0xFFDC2626)
         PoiHighlightCategory.BUS_STOP -> Color(0xFF8B5CF6)
         PoiHighlightCategory.ATM -> Color(0xFF0EA5E9)
         PoiHighlightCategory.FUEL -> Color(0xFFEA580C)
         PoiHighlightCategory.SCHOOL -> Color(0xFFEC4899)
-        PoiHighlightCategory.PARKING -> Color(0xFF475569)
+        PoiHighlightCategory.CHURCH_WORSHIP -> Color(0xFF14B8A6)
+        PoiHighlightCategory.BANK -> Color(0xFF1D4ED8)
+        PoiHighlightCategory.COPY_SHOP -> Color(0xFF65A30D)
     }
 }
 

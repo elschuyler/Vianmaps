@@ -21,6 +21,15 @@ object PoiCategoryHighlightDefaults {
     const val CAMERA_SETTLE_DEBOUNCE_MS = 750L
     const val SELECTION_CHANGE_DEBOUNCE_MS = 80L
     const val TILE_INGESTION_COALESCE_MS = 150L
+
+    /**
+     * Safety cap for rendering All POIs inside dense urban viewports without OOM/GeoJSON lag.
+     * When local viewport matches exceed this limit, UI explicitly exposes displayed vs total counts.
+     */
+    const val MAX_ALL_POIS_QUERY_LIMIT = 750
+    const val ALL_POIS_DENSE_THRESHOLD = 120
+    const val ALL_POIS_MARKER_COLOR_HEX = "#64748B"
+    const val ALL_POIS_PILL_ID = "all_pois"
 }
 
 enum class PoiHighlightCategory(
@@ -47,12 +56,6 @@ enum class PoiHighlightCategory(
         displayName = "Restaurant",
         markerColorHex = "#F59E0B",
         sqlTokens = setOf("restaurant")
-    ),
-    CAFE(
-        id = "cafe",
-        displayName = "Cafe",
-        markerColorHex = "#14B8A6",
-        sqlTokens = setOf("cafe")
     ),
     PHARMACY(
         id = "pharmacy",
@@ -92,11 +95,35 @@ enum class PoiHighlightCategory(
         markerColorHex = "#EC4899",
         sqlTokens = setOf("school")
     ),
-    PARKING(
-        id = "parking",
-        displayName = "Parking",
-        markerColorHex = "#475569",
-        sqlTokens = setOf("parking")
+    CHURCH_WORSHIP(
+        id = "church_worship",
+        displayName = "Church / Worship",
+        markerColorHex = "#14B8A6",
+        sqlTokens = setOf(
+            "place_of_worship",
+            "religious",
+            "church",
+            "temple",
+            "mosque",
+            "synagogue",
+            "chapel",
+            "cathedral"
+        ),
+        caveatNote = "Matches place_of_worship venues (churches, temples, mosques, synagogues); excludes tourist attractions and generic historic sites"
+    ),
+    BANK(
+        id = "bank",
+        displayName = "Bank",
+        markerColorHex = "#1D4ED8",
+        sqlTokens = setOf("bank"),
+        caveatNote = "Bank venues only; separate from standalone ATMs"
+    ),
+    COPY_SHOP(
+        id = "copy_shop",
+        displayName = "Copy Shop",
+        markerColorHex = "#65A30D",
+        sqlTokens = setOf("copyshop", "copy_shop"),
+        caveatNote = "Matches shop=copyshop features only"
     );
 
     fun matches(poi: OsmPoiRecord): Boolean {
@@ -106,7 +133,6 @@ enum class PoiHighlightCategory(
             SHOP -> cat == "shop" || sub == "shop"
             GROCERY -> cat == "grocery" || sub in GROCERY_SUB_TOKENS
             RESTAURANT -> cat == "restaurant" || sub == "restaurant"
-            CAFE -> cat == "cafe" || sub == "cafe"
             // OpenMapTiles frequently encodes pharmacies as class="hospital", subclass="pharmacy".
             PHARMACY -> cat == "pharmacy" || sub == "pharmacy"
             // Do not misclassify pharmacies (or unrelated medical subclasses) grouped under hospital class.
@@ -116,12 +142,61 @@ enum class PoiHighlightCategory(
             ATM -> cat == "atm" || sub == "atm"
             FUEL -> cat == "fuel" || sub == "fuel"
             SCHOOL -> sub == "school" || (cat == "school" && (sub.isEmpty() || sub == "school"))
-            PARKING -> cat == "parking" || sub == "parking"
+            CHURCH_WORSHIP -> {
+                if (cat in NON_WORSHIP_CLASSES || sub in NON_WORSHIP_SUBCLASSES) {
+                    false
+                } else {
+                    cat == "place_of_worship" ||
+                        sub == "place_of_worship" ||
+                        sub in WORSHIP_SPECIFIC_TOKENS ||
+                        ((cat in WORSHIP_SPECIFIC_TOKENS || cat == "religious") && sub.isEmpty())
+                }
+            }
+            BANK -> sub == "bank" || (cat == "bank" && (sub.isEmpty() || sub == "bank"))
+            COPY_SHOP -> cat == "copyshop" || cat == "copy_shop" ||
+                sub == "copyshop" || sub == "copy_shop"
         }
     }
 
     companion object {
         private val GROCERY_SUB_TOKENS = setOf("grocery", "supermarket", "convenience", "greengrocer", "deli")
+        private val WORSHIP_SPECIFIC_TOKENS = setOf(
+            "church",
+            "temple",
+            "mosque",
+            "synagogue",
+            "chapel",
+            "cathedral"
+        )
+        private val NON_WORSHIP_CLASSES = setOf(
+            "tourism",
+            "attraction",
+            "historic",
+            "monument",
+            "memorial",
+            "castle",
+            "ruins",
+            "archaeological_site",
+            "artwork",
+            "museum",
+            "viewpoint"
+        )
+        private val NON_WORSHIP_SUBCLASSES = setOf(
+            "attraction",
+            "historic",
+            "monument",
+            "memorial",
+            "castle",
+            "ruins",
+            "archaeological_site",
+            "artwork",
+            "museum",
+            "viewpoint",
+            "wayside_shrine",
+            "wayside_cross",
+            "pilgrimage",
+            "miracle"
+        )
 
         fun fromId(id: String): PoiHighlightCategory? {
             return entries.firstOrNull { it.id == id }
@@ -138,13 +213,29 @@ enum class PoiHighlightCategory(
         ): List<PoiHighlightCategory> {
             return selectedCategories.filter { it.matches(poi) }
         }
+
+        fun pickPrimaryCategory(matchedCategories: List<PoiHighlightCategory>): PoiHighlightCategory? {
+            if (matchedCategories.isEmpty()) return null
+            // Prefer specific sub-categories (e.g. Copy Shop, Grocery) over generic Shop when overlapping.
+            return matchedCategories.firstOrNull { it != SHOP } ?: matchedCategories.first()
+        }
     }
 }
 
 data class CategoryHighlightedPoi(
     val poi: OsmPoiRecord,
-    val primaryCategory: PoiHighlightCategory,
-    val matchedCategoryIds: List<String>
+    val primaryCategory: PoiHighlightCategory?,
+    val matchedCategoryIds: List<String>,
+    val markerColorHex: String = primaryCategory?.markerColorHex ?: PoiCategoryHighlightDefaults.ALL_POIS_MARKER_COLOR_HEX,
+    val categoryId: String = primaryCategory?.id ?: PoiCategoryHighlightDefaults.ALL_POIS_PILL_ID,
+    val categoryLabel: String = primaryCategory?.displayName ?: "All POIs"
+)
+
+data class ViewportPoiHighlightQueryResult(
+    val items: List<CategoryHighlightedPoi>,
+    val totalMatchingCount: Int,
+    val isTruncated: Boolean = false,
+    val displayLimit: Int? = null
 )
 
 data class PoiLatLngCorner(

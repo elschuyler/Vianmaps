@@ -119,6 +119,7 @@ fun AppModalManager(
     onPoiCategorySelect: (String?) -> Unit,
     onSelectPoiResult: (OsmPoiRecord) -> Unit,
     onToggleHighlightCategory: (String) -> Unit,
+    onToggleAllPoisHighlight: () -> Unit,
     onClearAllHighlightCategories: () -> Unit,
     onOpenPlacemarksWorkspace: () -> Unit,
     onOpenRoutesWorkspace: () -> Unit,
@@ -300,6 +301,7 @@ fun AppModalManager(
                 PoiHighlightPopupContent(
                     highlightState = uiState.categoryHighlightState,
                     onToggleCategory = onToggleHighlightCategory,
+                    onToggleAllPois = onToggleAllPoisHighlight,
                     onClearAll = onClearAllHighlightCategories,
                     onClose = onDismissModal
                 )
