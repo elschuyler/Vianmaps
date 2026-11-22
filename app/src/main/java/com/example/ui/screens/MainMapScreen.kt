@@ -212,6 +212,13 @@ fun MainMapScreen(
             viewModel.dismissMapContextMenu(controller)
             viewModel.recenterOnHighlightedPoi(controller)
         }
+        controller.onCameraSettledWithViewport = { bounds, zoom ->
+            viewModel.onCameraSettledForCategoryHighlight(bounds, zoom, controller)
+        }
+        controller.dispatchCurrentViewportIfReady()
+        controller.visibleTileCoordinator.poiIngestionEvents.collect {
+            viewModel.onTilePoisIngested(controller)
+        }
     }
 
     // Surface one-shot feedback messages cleanly via Snackbar
@@ -817,7 +824,7 @@ fun MainMapScreen(
                     viewModel.openPoiSearch()
                 },
                 onOpenPoiHighlight = {
-                    viewModel.openPoiHighlight()
+                    viewModel.openPoiHighlight(controller)
                 },
                 onPoiQueryChange = { query ->
                     viewModel.updatePoiSearchQuery(query)
@@ -828,14 +835,11 @@ fun MainMapScreen(
                 onSelectPoiResult = { poi ->
                     viewModel.selectSearchResult(poi, controller)
                 },
-                onTogglePoiHighlightVisibility = {
-                    viewModel.togglePoiHighlightVisibility(controller)
+                onToggleHighlightCategory = { categoryId ->
+                    viewModel.toggleHighlightCategory(categoryId, controller)
                 },
-                onRecenterPoiHighlight = {
-                    viewModel.recenterOnHighlightedPoi(controller)
-                },
-                onClearPoiHighlight = {
-                    viewModel.clearHighlightedPoi(controller)
+                onClearAllHighlightCategories = {
+                    viewModel.clearAllHighlightCategories(controller)
                 },
                 onOpenPlacemarksWorkspace = {
                     viewModel.openModal(ActiveModal.PlacemarksWorkspace)

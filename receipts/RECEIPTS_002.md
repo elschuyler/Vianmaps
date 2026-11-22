@@ -398,3 +398,28 @@ This file series is the project's permanent audit trail across sessions. Each fi
   - On-device verification: Not tested on physical Android hardware or streaming emulator in this container (no emulator/ADB available).
 * **Deviations from request**: None (`BLUEPRINT.md` left untouched as instructed).
 * **Known issues / follow-up**: Native `MapView` startup, controller wiring inside `MainMapScreen`, tile acquisition, offline storage calculations, and `NetworkDiagnosticsMonitor` warm-relaunch behavior require manual on-device QA. Stop at Stage 2 pending explicit approval for Stage 3.
+
+---
+
+### Entry 2026-11-22T11:29:00Z — Phase 4.3: Category-Based POI Highlight
+* **Summary**: Decouple Tools -> Highlight from POI Search and implement multi-select offline Category-Based POI Highlighting across Room v3, MapEngineController, MapViewModel, and PoiHighlightOverlays.
+* **Exact files touched**:
+  - `app/src/main/java/com/example/data/osm/PoiCategoryHighlight.kt` (created `PoiCategoryHighlightDefaults`, 11 MVT-backed `PoiHighlightCategory` entries, `CategoryHighlightedPoi`, `PoiLatLngCorner`, `PoiViewportBounds`)
+  - `app/src/main/java/com/example/data/db/AppDatabase.kt` (added `OsmPoiDao.getPoisByCategoryTokensInBounds` without 150-row cap; kept Room DB v3 unchanged)
+  - `app/src/main/java/com/example/data/osm/OsmOfflineDataRepository.kt` (added `queryCategoryHighlightedPois` on `Dispatchers.IO` with antimeridian split & `osmId` deduplication)
+  - `app/src/main/java/com/example/map/acquisition/VisibleTileCoordinator.kt` (added `poiIngestionEvents` `SharedFlow` emitting decoded POI count)
+  - `app/src/main/java/com/example/map/engine/MapEngineController.kt` (added `vian-category-highlight-*` source/halo/core layers, `onCameraSettledWithViewport`, `updateCategoryHighlightedPois`, `clearCategoryHighlights`, `dispatchCurrentViewportIfReady`, restored across style & composition switches)
+  - `app/src/main/java/com/example/ui/screens/MapViewModel.kt` (added `PoiCategoryHighlightUiState`, toggle/clearAll, 750ms camera-idle debounce, `categoryQueryGeneration` cancellation, zoom pause/resume at `13.0`, tile ingestion refresh, and `init` race guard preserving active viewport zoom)
+  - `app/src/main/java/com/example/ui/components/PoiHighlightOverlays.kt` (reworked `PoiHighlightPopupContent` to multi-select `FlowRow` category pills, counts, `Clear All`, honest paused/empty notices; preserved `SelectedPoiHighlightBanner`)
+  - `app/src/main/java/com/example/ui/components/AppModalManager.kt` & `app/src/main/java/com/example/ui/screens/MainMapScreen.kt` (wired category popup, camera-settled viewport dispatch, and `poiIngestionEvents` collection; kept `MapView` single-instance lifecycle & Search intact)
+  - `app/src/test/java/com/example/PoiCategoryHighlightTest.kt` (created 8 JVM/Robolectric unit tests covering all 11 categories, unbounded viewport filtering, antimeridian deduplication, Search independence, zoom pause/resume, debounced cancellation, popup UI semantics, and tile ingestion + composition overlay persistence)
+  - `BLUEPRINT.md` & `receipts/RECEIPTS_002.md` (updated Phase 4.3 records)
+* **What was actually done**:
+  - Replaced single-POI Highlight popup state with independent multi-select category overlay backed by Room `osm_pois` (offline-only, no HTTP/GPS calls, DB v3 schema untouched).
+  - Fixed `MapViewModel.init` race condition where late DataStore preference load previously reset active viewport zoom to `2.0` (`isPausedByZoom = true`), and updated `PoiCategoryHighlightTest` Looper clock advancement (`idleFor`) for `Dispatchers.Main` debounce tests.
+* **How it was verified**:
+  - Local JVM/Robolectric unit tests (`JAVA_TOOL_OPTIONS="-Drobolectric.offline=true -Drobolectric.dependency.dir=/home/appuser/.m2/repository/org/robolectric/android-all-instrumented/16-robolectric-13921718-i7" gradle :app:testDebugUnitTest --console=plain`): `ExampleUnitTest` 65/65, `MapActivationSeamTest` 10/10, `PoiCategoryHighlightTest` 8/8 — 83/83 passed (0 failures/errors/skipped).
+  - Container applet compilation (`compile_applet`): `Build succeeded - the applet is compiled`.
+  - On-device verification: Not tested on physical Android hardware or streaming emulator in this container (no emulator/ADB available).
+* **Deviations from request**: None.
+* **Known issues / follow-up**: Manual on-device QA required for MapLibre GL camera idle events, circle rendering under dense POIs/different styles, and z13.0 pause threshold tuning. Bank-embedded `atm=yes` features remain unavailable in OpenFreeMap MVT `poi` tiles (`z<=14`).

@@ -18,8 +18,11 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
@@ -94,6 +97,9 @@ class VisibleTileCoordinator(
 
     private val _coverageStatus = MutableStateFlow(AcquisitionCoverageStatus())
     val coverageStatus: StateFlow<AcquisitionCoverageStatus> = _coverageStatus.asStateFlow()
+
+    private val _poiIngestionEvents = MutableSharedFlow<Int>(extraBufferCapacity = 32)
+    val poiIngestionEvents: SharedFlow<Int> = _poiIngestionEvents.asSharedFlow()
 
     fun onCameraSettled(map: MapLibreMap, currentStyle: MapStyleDefinition) {
         activeAcquisitionJob?.cancel()
@@ -234,6 +240,9 @@ class VisibleTileCoordinator(
                                 // Decode MVT and store canonical features in Room
                                 val decoded = MvtParser.parseTile(bodyBytes, tile)
                                 val insertedCount = osmRepository.ingestDecodedTile(decoded)
+                                if (decoded.pois.isNotEmpty()) {
+                                    _poiIngestionEvents.tryEmit(decoded.pois.size)
+                                }
 
                                 DiagnosticRepository.log(
                                     severity = LogSeverity.INFO,

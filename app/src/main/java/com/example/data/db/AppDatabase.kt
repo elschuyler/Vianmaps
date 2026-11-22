@@ -190,6 +190,26 @@ interface OsmPoiDao {
         limit: Int = 150
     ): List<OsmPoiRecord>
 
+    @Query(
+        """
+        SELECT * FROM osm_pois
+        WHERE latitude BETWEEN :minLat AND :maxLat
+          AND longitude BETWEEN :minLng AND :maxLng
+          AND (
+              LOWER(category) IN (:tokens)
+              OR LOWER(COALESCE(subCategory, '')) IN (:tokens)
+          )
+        ORDER BY osmId ASC
+        """
+    )
+    suspend fun getPoisByCategoryTokensInBounds(
+        minLat: Double,
+        maxLat: Double,
+        minLng: Double,
+        maxLng: Double,
+        tokens: List<String>
+    ): List<OsmPoiRecord>
+
     @Query("DELETE FROM osm_pois")
     suspend fun clearAllPois()
 }

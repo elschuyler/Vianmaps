@@ -5,6 +5,9 @@ import android.graphics.PointF
 import android.graphics.RectF
 import com.example.data.db.OsmPoiRecord
 import com.example.data.db.UserPlaceEntity
+import com.example.data.osm.CategoryHighlightedPoi
+import com.example.data.osm.PoiLatLngCorner
+import com.example.data.osm.PoiViewportBounds
 import com.example.data.places.RoutePoint
 import com.example.data.places.SavedRouteModel
 import com.example.diagnostics.DiagnosticRepository
@@ -12,6 +15,7 @@ import com.example.diagnostics.LogSeverity
 import com.example.map.acquisition.VisibleTileCoordinator
 import com.example.map.composition.MapComposition
 import com.example.map.source.MapStyleDefinition
+import org.maplibre.android.style.expressions.Expression
 import org.maplibre.android.camera.CameraPosition
 import org.maplibre.android.camera.CameraUpdateFactory
 import org.maplibre.android.geometry.LatLng
@@ -64,6 +68,12 @@ class MapEngineController(
     var isHighlightVisible: Boolean = true
         private set
 
+    var currentCategoryHighlightedPois: List<CategoryHighlightedPoi> = emptyList()
+        private set
+
+    var isCategoryHighlightVisible: Boolean = false
+        private set
+
     var lastCameraFocusTarget: Pair<Double, Double>? = null
         private set
 
@@ -96,12 +106,17 @@ class MapEngineController(
     var onPlacemarkTapped: ((placeId: String) -> Unit)? = null
     var onRouteTapped: ((routeId: String) -> Unit)? = null
     var onHighlightedPoiTapped: (() -> Unit)? = null
+    var onCameraSettledWithViewport: ((bounds: PoiViewportBounds, zoom: Double) -> Unit)? = null
 
     val visibleTileCoordinator: VisibleTileCoordinator by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         visibleTileCoordinatorFactory?.invoke() ?: VisibleTileCoordinator(appContext)
     }
 
     companion object {
+        const val CATEGORY_HIGHLIGHT_SOURCE_ID = "vian-category-highlight-source"
+        const val CATEGORY_HIGHLIGHT_HALO_LAYER_ID = "vian-category-highlight-halo"
+        const val CATEGORY_HIGHLIGHT_CORE_LAYER_ID = "vian-category-highlight-core"
+
         const val HIGHLIGHT_SOURCE_ID = "vian-selected-highlight-source"
         const val HIGHLIGHT_HALO_LAYER_ID = "vian-selected-highlight-halo"
         const val HIGHLIGHT_CORE_LAYER_ID = "vian-selected-highlight-core"
@@ -167,6 +182,7 @@ class MapEngineController(
             currentStyleDefinition?.let { curStyle ->
                 visibleTileCoordinator.onCameraSettled(map, curStyle)
             }
+            dispatchCurrentViewportIfReady()
         }
 
         map.addOnMapClickListener { latLng ->
@@ -287,6 +303,7 @@ class MapEngineController(
                 null
             )
             visibleTileCoordinator.onCameraSettled(map, styleDef)
+            dispatchCurrentViewportIfReady()
             return
         }
 
@@ -340,6 +357,7 @@ class MapEngineController(
 
             // Trigger initial visible tile acquisition
             visibleTileCoordinator.onCameraSettled(map, styleDef)
+            dispatchCurrentViewportIfReady()
         }
     }
 
@@ -659,7 +677,48 @@ class MapEngineController(
         )
     }
 
+    fun updateCategoryHighlightedPois(
+        pois: List<CategoryHighlightedPoi>,
+        isVisible: Boolean
+    ) {
+        currentCategoryHighlightedPois = pois.distinctBy { it.poi.osmId }
+        isCategoryHighlightVisible = isVisible
+        maplibreMap?.style?.let { style ->
+            if (style.isFullyLoaded) {
+                applyCategoryPoiHighlightsToStyle(style)
+            }
+        }
+    }
+
+    fun clearCategoryHighlights() {
+        currentCategoryHighlightedPois = emptyList()
+        isCategoryHighlightVisible = false
+        maplibreMap?.style?.let { style ->
+            if (style.isFullyLoaded) {
+                applyCategoryPoiHighlightsToStyle(style)
+            }
+        }
+    }
+
+    fun dispatchCurrentViewportIfReady() {
+        val map = maplibreMap ?: return
+        try {
+            val region = map.projection.visibleRegion
+            val corners = listOfNotNull(
+                region.nearLeft,
+                region.nearRight,
+                region.farRight,
+                region.farLeft
+            ).map { PoiLatLngCorner(it.latitude, it.longitude) }
+            val bounds = PoiViewportBounds.fromCorners(corners) ?: return
+            val zoom = map.cameraPosition.zoom
+            onCameraSettledWithViewport?.invoke(bounds, zoom)
+        } catch (_: Throwable) {
+        }
+    }
+
     private fun applyAllVianOverlaysToStyle(style: Style) {
+        applyCategoryPoiHighlightsToStyle(style)
         applySavedRoutesToStyle(style)
         applyUserPlacemarksToStyle(style)
         applyRouteDraftToStyle(style)
@@ -1047,6 +1106,73 @@ class MapEngineController(
                 style.addLayerAbove(core, AREA_PIN_HALO_LAYER_ID)
             }
         } catch (_: Throwable) {
+        }
+    }
+
+    private fun applyCategoryPoiHighlightsToStyle(style: Style) {
+        try {
+            val shouldShow = isCategoryHighlightVisible && currentCategoryHighlightedPois.isNotEmpty()
+            val features = if (shouldShow) {
+                currentCategoryHighlightedPois
+                    .distinctBy { it.poi.osmId }
+                    .filter { RoutePoint(it.poi.latitude, it.poi.longitude).isValid() }
+                    .map { item ->
+                        Feature.fromGeometry(
+                            Point.fromLngLat(item.poi.longitude, item.poi.latitude)
+                        ).apply {
+                            addNumberProperty("osmId", item.poi.osmId)
+                            addStringProperty("name", item.poi.name)
+                            addStringProperty("categoryId", item.primaryCategory.id)
+                            addStringProperty("categoryLabel", item.primaryCategory.displayName)
+                            addStringProperty("markerColor", item.primaryCategory.markerColorHex)
+                        }
+                    }
+            } else {
+                emptyList()
+            }
+            val collection = FeatureCollection.fromFeatures(features)
+            val existingSource = style.getSourceAs<GeoJsonSource>(CATEGORY_HIGHLIGHT_SOURCE_ID)
+            if (existingSource != null) {
+                existingSource.setGeoJson(collection)
+            } else {
+                style.addSource(GeoJsonSource(CATEGORY_HIGHLIGHT_SOURCE_ID, collection))
+            }
+
+            val visibilityValue = if (shouldShow) Property.VISIBLE else Property.NONE
+
+            val existingHalo = style.getLayer(CATEGORY_HIGHLIGHT_HALO_LAYER_ID)
+            if (existingHalo != null) {
+                existingHalo.setProperties(PropertyFactory.visibility(visibilityValue))
+            } else {
+                val haloLayer = CircleLayer(CATEGORY_HIGHLIGHT_HALO_LAYER_ID, CATEGORY_HIGHLIGHT_SOURCE_ID).withProperties(
+                    PropertyFactory.circleRadius(10.5f),
+                    PropertyFactory.circleColor("#CCFFFFFF"),
+                    PropertyFactory.circleStrokeWidth(1.5f),
+                    PropertyFactory.circleStrokeColor(Expression.get("markerColor")),
+                    PropertyFactory.visibility(visibilityValue)
+                )
+                style.addLayer(haloLayer)
+            }
+
+            val existingCore = style.getLayer(CATEGORY_HIGHLIGHT_CORE_LAYER_ID)
+            if (existingCore != null) {
+                existingCore.setProperties(PropertyFactory.visibility(visibilityValue))
+            } else {
+                val coreLayer = CircleLayer(CATEGORY_HIGHLIGHT_CORE_LAYER_ID, CATEGORY_HIGHLIGHT_SOURCE_ID).withProperties(
+                    PropertyFactory.circleRadius(6.5f),
+                    PropertyFactory.circleColor(Expression.get("markerColor")),
+                    PropertyFactory.circleStrokeWidth(2f),
+                    PropertyFactory.circleStrokeColor("#FFFFFF"),
+                    PropertyFactory.visibility(visibilityValue)
+                )
+                style.addLayerAbove(coreLayer, CATEGORY_HIGHLIGHT_HALO_LAYER_ID)
+            }
+        } catch (e: Throwable) {
+            DiagnosticRepository.log(
+                severity = LogSeverity.WARNING,
+                source = "MapEngineController",
+                description = "Failed applying category POI highlight layer: ${e.message}"
+            )
         }
     }
 

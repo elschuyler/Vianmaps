@@ -129,6 +129,48 @@ class OsmOfflineDataRepository(
         poiDao.getAllPois(limit.coerceIn(1, 50))
     }
 
+    suspend fun queryCategoryHighlightedPois(
+        bounds: PoiViewportBounds,
+        selectedCategories: List<PoiHighlightCategory>
+    ): List<CategoryHighlightedPoi> = withContext(Dispatchers.IO) {
+        if (selectedCategories.isEmpty() || !bounds.isValid()) {
+            return@withContext emptyList()
+        }
+        val tokens = PoiHighlightCategory.collectSqlTokens(selectedCategories)
+        if (tokens.isEmpty()) {
+            return@withContext emptyList()
+        }
+
+        val candidatesByOsmId = LinkedHashMap<Long, OsmPoiRecord>()
+        for ((westLng, eastLng) in bounds.longitudeRanges()) {
+            val slice = poiDao.getPoisByCategoryTokensInBounds(
+                minLat = bounds.southLat,
+                maxLat = bounds.northLat,
+                minLng = westLng,
+                maxLng = eastLng,
+                tokens = tokens
+            )
+            for (poi in slice) {
+                candidatesByOsmId.putIfAbsent(poi.osmId, poi)
+            }
+        }
+
+        val highlighted = ArrayList<CategoryHighlightedPoi>(candidatesByOsmId.size)
+        for (poi in candidatesByOsmId.values) {
+            val matched = PoiHighlightCategory.matchSelectedCategories(poi, selectedCategories)
+            if (matched.isNotEmpty()) {
+                highlighted.add(
+                    CategoryHighlightedPoi(
+                        poi = poi,
+                        primaryCategory = matched.first(),
+                        matchedCategoryIds = matched.map { it.id }
+                    )
+                )
+            }
+        }
+        highlighted
+    }
+
     suspend fun getPoiCount(): Int = withContext(Dispatchers.IO) { poiDao.getPoiCount() }
     suspend fun getBuildingCount(): Int = withContext(Dispatchers.IO) { buildingDao.getBuildingCount() }
     suspend fun getRegionCount(): Int = withContext(Dispatchers.IO) { regionDao.getRegionCount() }

@@ -118,9 +118,8 @@ fun AppModalManager(
     onPoiQueryChange: (String) -> Unit,
     onPoiCategorySelect: (String?) -> Unit,
     onSelectPoiResult: (OsmPoiRecord) -> Unit,
-    onTogglePoiHighlightVisibility: () -> Unit,
-    onRecenterPoiHighlight: () -> Unit,
-    onClearPoiHighlight: () -> Unit,
+    onToggleHighlightCategory: (String) -> Unit,
+    onClearAllHighlightCategories: () -> Unit,
     onOpenPlacemarksWorkspace: () -> Unit,
     onOpenRoutesWorkspace: () -> Unit,
     onOpenSavedAreasWorkspace: () -> Unit,
@@ -299,12 +298,9 @@ fun AppModalManager(
         is ActiveModal.PoiHighlight -> {
             FloatingPopupDialog(onDismiss = onDismissModal) {
                 PoiHighlightPopupContent(
-                    highlightedPoi = uiState.highlightedPoi,
-                    isHighlightVisible = uiState.isPoiHighlightVisible,
-                    onToggleVisibility = onTogglePoiHighlightVisibility,
-                    onRecenter = onRecenterPoiHighlight,
-                    onClearHighlight = onClearPoiHighlight,
-                    onOpenSearch = onOpenPoiSearch,
+                    highlightState = uiState.categoryHighlightState,
+                    onToggleCategory = onToggleHighlightCategory,
+                    onClearAll = onClearAllHighlightCategories,
                     onClose = onDismissModal
                 )
             }
@@ -790,7 +786,7 @@ fun ToolsPopupContent(
 ) {
     val tools = listOf(
         Pair("Search", "Search locally acquired OSM places & categories"),
-        Pair("Highlight", "Inspect & highlight selected local POI on map"),
+        Pair("Highlight", "Highlight OSM POI categories in visible viewport"),
         Pair("Measure", "Distance and terrain elevation calculation"),
         Pair("Navigate", "Compass bearings and azimuth waypoints"),
         Pair("Weather", "Atmospheric pressure and radar preview"),
