@@ -52,6 +52,18 @@ class MapEngineController(
 ) {
     private val appContext: Context = context.applicationContext ?: context
 
+    private var targetInitialLat: Double = initialLat
+    private var targetInitialLng: Double = initialLng
+    private var targetInitialZoom: Double = initialZoom
+    private var targetInitialBearing: Double = initialBearing
+
+    @Volatile
+    var isReleased: Boolean = false
+        private set
+
+    @Volatile
+    private var suppressCameraCallbacks: Boolean = false
+
     var maplibreMap: MapLibreMap? = null
         private set
 
@@ -143,11 +155,48 @@ class MapEngineController(
         const val AREA_PIN_CORE_LAYER_ID = "vian-area-pin-core"
     }
 
+    fun applyRestoredCamera(lat: Double, lng: Double, zoom: Double, bearing: Double) {
+        if (isReleased) return
+        targetInitialLat = lat
+        targetInitialLng = lng
+        targetInitialZoom = zoom
+        targetInitialBearing = bearing
+
+        val map = maplibreMap ?: return
+        suppressCameraCallbacks = true
+        try {
+            map.cameraPosition = CameraPosition.Builder()
+                .target(LatLng(lat, lng))
+                .zoom(zoom)
+                .bearing(if (isNorthLocked) 0.0 else bearing)
+                .tilt(0.0)
+                .build()
+        } catch (_: Throwable) {
+        } finally {
+            suppressCameraCallbacks = false
+        }
+    }
+
+    fun release() {
+        if (isReleased) return
+        isReleased = true
+        visibleTileCoordinator.stop()
+        onMapTap = null
+        onEmptyMapSingleTap = null
+        onMapLongPress = null
+        onPlacemarkTapped = null
+        onRouteTapped = null
+        onHighlightedPoiTapped = null
+        onCameraSettledWithViewport = null
+        maplibreMap = null
+    }
+
     fun attachMap(
         map: MapLibreMap,
         styleDef: MapStyleDefinition,
         onStatusChanged: (status: MapEngineStatus, stageDescription: String?, error: String?) -> Unit
     ) {
+        if (isReleased) return
         this.maplibreMap = map
         this.currentStyleDefinition = styleDef
 
@@ -157,16 +206,22 @@ class MapEngineController(
         map.uiSettings.isRotateGesturesEnabled = !isNorthLocked
         map.uiSettings.isTiltGesturesEnabled = false // 2D flat mode
 
-        map.cameraPosition = CameraPosition.Builder()
-            .target(LatLng(initialLat, initialLng))
-            .zoom(initialZoom)
-            .bearing(if (isNorthLocked) 0.0 else initialBearing)
-            .tilt(0.0)
-            .build()
+        suppressCameraCallbacks = true
+        try {
+            map.cameraPosition = CameraPosition.Builder()
+                .target(LatLng(targetInitialLat, targetInitialLng))
+                .zoom(targetInitialZoom)
+                .bearing(if (isNorthLocked) 0.0 else targetInitialBearing)
+                .tilt(0.0)
+                .build()
+        } finally {
+            suppressCameraCallbacks = false
+        }
 
         loadStyle(styleDef, onStatusChanged)
 
         map.addOnCameraMoveListener {
+            if (isReleased || suppressCameraCallbacks) return@addOnCameraMoveListener
             val position = map.cameraPosition
             val target = position.target
             if (target != null) {
@@ -180,6 +235,7 @@ class MapEngineController(
         }
 
         map.addOnCameraIdleListener {
+            if (isReleased) return@addOnCameraIdleListener
             currentStyleDefinition?.let { curStyle ->
                 visibleTileCoordinator.onCameraSettled(map, curStyle)
             }
@@ -187,6 +243,7 @@ class MapEngineController(
         }
 
         map.addOnMapClickListener { latLng ->
+            if (isReleased) return@addOnMapClickListener false
             var hitPlaceId: String? = null
             var hitRouteId: String? = null
             var hitPoi = false
@@ -225,6 +282,7 @@ class MapEngineController(
         }
 
         map.addOnMapLongClickListener { latLng ->
+            if (isReleased) return@addOnMapLongClickListener false
             dispatchMapLongPress(latLng.latitude, latLng.longitude)
             true
         }

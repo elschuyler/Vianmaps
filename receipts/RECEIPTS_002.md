@@ -447,3 +447,6 @@ This file series is the project's permanent audit trail across sessions. Each fi
 * **Deviations from request**: None.
 * **Known issues / follow-up**: Manual on-device QA required for dense `All POIs` neutral circle legibility, live MapLibre camera-idle/zoom transitions, and tile ingestion refresh. OpenMapTiles `poi` (`z<=14`) aggregates `place_of_worship` under `class`/`subclass` without guaranteed church/mosque/temple split and does not emit bank-nested `atm=yes` POIs separately from `bank`.
 
+---
+
+> **Receipts Ledger Closed (453 / 500 lines max)** — Subsequent audit entries continue in `receipts/RECEIPTS_003.md`.

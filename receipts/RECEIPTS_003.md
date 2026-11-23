@@ -1,0 +1,32 @@
+# Vian Maps Implementation Receipts (003)
+
+> Continuation of `receipts/RECEIPTS_002.md`. Strict 500-line cap enforced per file.
+
+---
+
+### Entry 2026-11-23T21:59:00Z — Phase AB-1: Independent Map / Notes Activation Boundary
+* **Summary**: Implement a host-level Map/Notes destination shell and independent Map activation/deactivation boundary with process-level MapLibre SDK tracking, per-session ViewModelStore & resource teardown, durable camera/preference flush across transitions, and Placemarks long-press entry into a minimal Notes placeholder.
+* **Exact files touched**:
+  - `app/src/main/java/com/example/host/AppHostShell.kt` (created `AppHostDestination` [`MAP`, `NOTES`], `EXTRA_INITIAL_DESTINATION`, `resolveInitialHostDestination`, `AppHostShell`, and minimal `NotesPlaceholderScreen` with `Return to Map` button and `BackHandler`)
+  - `app/src/main/java/com/example/MainActivity.kt` (resolved initial destination before conditional `mapFeature.activate(this)` and rendered `AppHostShell` instead of unconditional `mapFeature.Content()`)
+  - `app/src/main/java/com/example/map/activation/MapActivationSeam.kt` (added `MapDeactivationResult`, `isRuntimeInitialized`, `ProcessMapRuntimeState`, `DefaultMapRuntimeInitializer` once-per-process guard, immutable `ActiveMapSession` with per-session `SessionViewModelStoreOwner`, `CompositionLocalProvider(LocalViewModelStoreOwner)` + `key(sessionId)`, idempotent `deactivate()`, and `activeSessionContent` test hook)
+  - `app/src/main/java/com/example/map/engine/MapEngineController.kt` (added `isReleased`, `suppressCameraCallbacks`, `applyRestoredCamera(...)`, listener release guards, and idempotent `release()`)
+  - `app/src/main/java/com/example/ui/screens/MapViewModel.kt` (added `hasLoadedPreferences`, local override guards in `init`, `launchPreferenceWrite` with `NonCancellable`, `flushPendingStateBlocking()`, `isCleared`, and fallback flush in `onCleared()`)
+  - `app/src/main/java/com/example/data/preferences/AppPreferencesRepository.kt` (replaced top-level `preferencesDataStore` delegate with canonical-path `ConcurrentHashMap` DataStore factory cache preventing cross-test deleted-directory stale singletons while keeping a single process-wide DataStore instance on device)
+  - `app/src/main/java/com/example/diagnostics/NetworkDiagnosticsMonitor.kt` (exposed `internal val isCallbackRegistered`)
+  - `app/src/main/java/com/example/ui/screens/MainMapScreen.kt` (added `onOpenNotes` & `onRegisterControllerTeardown`, `LaunchedEffect(uiState.hasLoadedPreferences)` camera sync, `controller.isReleased` guard in `getMapAsync`, `controller.release()` in `DisposableEffect.onDispose`, and wired `BottomNavigationBar.onPlacesLongClick` to `onOpenNotes`)
+  - `app/src/main/java/com/example/ui/components/BottomNavigationBar.kt` (updated comments for Placemarks long-press -> Notes without UI changes)
+  - `app/src/main/res/values/strings.xml` (added `notes_placeholder_title`, `notes_placeholder_subtitle`, `notes_return_to_map` while preserving `app_name`)
+  - `app/src/test/java/com/example/MapActivationSeamTest.kt` (added `ab1_01`–`ab1_07` covering cold-launch Notes independence, default Map activation, Map -> Notes session teardown, Notes -> Map re-activation & camera/style/internet restoration, Tap Placemarks & bottom bar preservation, repeated switching & idempotent deactivation, and activation failure/retry)
+  - `BLUEPRINT.md`, `receipts/RECEIPTS_002.md`, `receipts/RECEIPTS_003.md` (updated blueprint & receipts audit trail)
+* **What was actually done**:
+  - Separated host destination routing (`AppHostShell`) from `MapFeatureActivation`, initializing `Map` only when `Map` is the active destination and keeping `MainMapScreen` removed from composition when `Notes` is displayed.
+  - Tracked process-level native `MapLibre` initialization via `ProcessMapRuntimeState` so `MapLibre.getInstance()` and `OfflineManager` ambient cache setup run once per process while per-session `MapRuntimeDependencies`, `SessionViewModelStoreOwner` (`MapViewModel`), `MapEngineController`, `VisibleTileCoordinator`, `NetworkDiagnosticsMonitor`, and `MapView` are torn down cleanly on `Map -> Notes` and recreated cleanly on `Notes -> Map`.
+  - Flushed pending `AppPreferencesRepository` camera/preference writes deterministically via `flushPendingStateBlocking()` before `viewModelStore.clear()`, and changed `DataStore` instance caching from a fixed single delegate to canonical file path so Robolectric tests remain isolated across test sandboxes while sharing one DataStore per file in production.
+  - Preserved Room `map_app_master.db` at version 3, `Tap Placemarks -> PlacesPopupContent -> Open Memory Palace Workspace`, all Phase 4.3.1 features, and UI styling.
+* **How it was verified**:
+  - Local JVM/Robolectric unit tests (`JAVA_TOOL_OPTIONS="-Drobolectric.offline=true -Drobolectric.dependency.dir=/home/appuser/.m2/repository/org/robolectric/android-all-instrumented/16-robolectric-13921718-i7" gradle :app:testDebugUnitTest --console=plain`): `TEST-com.example.ExampleUnitTest.xml` 65/65, `TEST-com.example.MapActivationSeamTest.xml` 17/17, `TEST-com.example.PoiCategoryHighlightTest.xml` 8/8 — 90/90 passed (`failures="0"`, `errors="0"`, `skipped="0"`). Note: `MapActivationSeamTest` tests `MainActivity` cold-launch into `Notes` directly against `MapLibre.hasInstance() == false`, and exercises interactive `Map <-> Notes` Compose lifecycle with `MapActivationCoordinator`'s injectable `MapRuntimeInitializer` + `activeSessionContent` (substituting native GL `MapView`, since `libmaplibre.so` cannot execute on Linux JVM).
+  - Container applet compilation (`compile_applet`): Verified after final edits.
+  - On-device verification: Not tested on physical Android hardware or streaming emulator in this container (no emulator/ADB available).
+* **Deviations from request**: None.
+* **Known issues / follow-up**: Native `MapView` GL surface recreation/destruction and live MapLibre `OfflineManager` reuse across repeated `Map -> Notes -> Map` transitions on physical Android hardware require manual on-device QA. Workspace `.git` directory is absent in this AI Studio container (comparison against remote commit `20c03ee76d2c35d21d6f01fc33067ed96e1218d2` could not be executed via Git CLI); pre-existing 0-byte `remix-vian-helper.zip` at root and `.build-outputs/app-debug.apk` were left untouched. Stop at Phase AB-1 pending explicit approval for the next Notes phase.

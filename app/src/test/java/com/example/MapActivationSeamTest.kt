@@ -3,22 +3,48 @@ package com.example
 import android.app.Application
 import android.content.Context
 import android.content.ContextWrapper
+import android.content.Intent
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Text
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.longClick
+import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTouchInput
+import androidx.lifecycle.ViewModelStore
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.db.AppDatabase
 import com.example.data.db.AppDatabaseContract
 import com.example.diagnostics.DiagnosticRepository
 import com.example.diagnostics.LogSeverity
+import com.example.host.AppHostDestination
+import com.example.host.AppHostShell
+import com.example.host.EXTRA_DESTINATION_NOTES
+import com.example.host.EXTRA_INITIAL_DESTINATION
+import com.example.host.resolveInitialHostDestination
 import com.example.map.acquisition.VisibleTileCoordinator
+import com.example.map.activation.MapActivationBoundary
 import com.example.map.activation.MapActivationCoordinator
 import com.example.map.activation.MapActivationResult
 import com.example.map.activation.MapActivationState
+import com.example.map.activation.MapDeactivationResult
 import com.example.map.activation.MapFeatureActivation
 import com.example.map.activation.MapRuntimeDependencies
 import com.example.map.activation.MapRuntimeInitializer
+import com.example.map.activation.ProcessMapRuntimeState
+import com.example.map.engine.MapEngineController
+import com.example.map.source.MapSourceRepository
+import com.example.ui.components.BottomNavigationBar
 import com.example.ui.screens.MapViewModel
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -33,11 +59,13 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.maplibre.android.MapLibre
+import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 @RunWith(RobolectricTestRunner::class)
@@ -365,5 +393,526 @@ class MapActivationSeamTest {
         assertFalse(hostFieldTypes.any { it.contains("MapStorageService") })
         assertFalse(hostFieldTypes.any { it.contains("MapViewModel") })
         assertFalse(hostFieldTypes.any { it.contains("MapEngineController") })
+    }
+
+    @Test
+    fun ab1_01_coldLaunchIntoNotesDoesNotActivateMapOrInitializeMapLibre() {
+        assertEquals(AppHostDestination.MAP, resolveInitialHostDestination(null))
+        val notesIntent = Intent(context, MainActivity::class.java)
+            .putExtra(EXTRA_INITIAL_DESTINATION, EXTRA_DESTINATION_NOTES)
+        assertEquals(AppHostDestination.NOTES, resolveInitialHostDestination(notesIntent))
+
+        // Cold launch real MainActivity directly into Notes
+        val controller = Robolectric.buildActivity(MainActivity::class.java, notesIntent)
+            .create()
+            .start()
+            .resume()
+        try {
+            assertEquals(MapActivationState.Inactive, MapFeatureActivation.state.value)
+            assertFalse(MapFeatureActivation.isRuntimeInitialized)
+            assertFalse("Cold-launching Notes must not initialize MapLibre", MapLibre.hasInstance())
+            assertEquals(0, ProcessMapRuntimeState.initializationCount)
+        } finally {
+            controller.pause().stop().destroy()
+        }
+
+        // Verify host shell stays inactive on Notes until Return to Map is tapped
+        val sdkInitCalls = AtomicInteger(0)
+        val depsCreated = AtomicInteger(0)
+        val coordinator = MapActivationCoordinator(
+            runtimeInitializer = MapRuntimeInitializer { sdkInitCalls.incrementAndGet() },
+            dependenciesFactory = { ctx ->
+                depsCreated.incrementAndGet()
+                MapRuntimeDependencies(ctx)
+            },
+            activeSessionContent = { _, _, _, _, _ ->
+                Text("Map Session Active")
+            }
+        )
+
+        composeTestRule.setContent {
+            AppHostShell(
+                initialDestination = AppHostDestination.NOTES,
+                mapFeature = coordinator
+            )
+        }
+        composeTestRule.waitForIdle()
+
+        assertEquals(MapActivationState.Inactive, coordinator.state.value)
+        assertFalse(coordinator.isRuntimeInitialized)
+        assertEquals(0, sdkInitCalls.get())
+        assertEquals(0, depsCreated.get())
+        assertNull(coordinator.dependenciesOrNull())
+        composeTestRule.onNodeWithTag("notes_placeholder_screen").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("notes_return_to_map_button").assertIsDisplayed()
+
+        // Tapping Return to Map activates Map cleanly
+        composeTestRule.onNodeWithTag("notes_return_to_map_button").performClick()
+        composeTestRule.waitForIdle()
+
+        assertEquals(MapActivationState.Active, coordinator.state.value)
+        assertTrue(coordinator.isRuntimeInitialized)
+        assertEquals(1, sdkInitCalls.get())
+        assertEquals(1, depsCreated.get())
+        assertEquals(0, composeTestRule.onAllNodesWithTag("notes_placeholder_screen").fetchSemanticsNodes().size)
+        composeTestRule.onNodeWithText("Map Session Active").assertIsDisplayed()
+    }
+
+    @Test
+    fun ab1_02_defaultHostLaunchActivatesMapOnceAndRendersMap() {
+        val sdkInitCalls = AtomicInteger(0)
+        val depsCreated = AtomicInteger(0)
+        val coordinator = MapActivationCoordinator(
+            runtimeInitializer = MapRuntimeInitializer { sdkInitCalls.incrementAndGet() },
+            dependenciesFactory = { ctx ->
+                depsCreated.incrementAndGet()
+                MapRuntimeDependencies(ctx)
+            },
+            activeSessionContent = { modifier, _, viewModel, onOpenNotes, registerTeardown ->
+                val state by viewModel.uiState.collectAsStateWithLifecycle()
+                Box(modifier = modifier.fillMaxSize()) {
+                    BottomNavigationBar(
+                        isNorthLocked = state.camera.isNorthLocked,
+                        onSettingsClick = {},
+                        onSettingsLongClick = {},
+                        onMapsClick = {},
+                        onPlacesClick = {},
+                        onPlacesLongClick = onOpenNotes,
+                        onCompassToggleClick = { viewModel.toggleNorthLock() },
+                        onToolsLongClick = {}
+                    )
+                }
+            }
+        )
+
+        composeTestRule.setContent {
+            AppHostShell(
+                initialDestination = AppHostDestination.MAP,
+                mapFeature = coordinator
+            )
+        }
+        composeTestRule.waitForIdle()
+
+        assertEquals(MapActivationState.Active, coordinator.state.value)
+        assertTrue(coordinator.isRuntimeInitialized)
+        assertEquals(1, sdkInitCalls.get())
+        assertEquals(1, depsCreated.get())
+        composeTestRule.onNodeWithTag("bottom_nav_bar").assertIsDisplayed()
+        assertEquals(0, composeTestRule.onAllNodesWithTag("notes_placeholder_screen").fetchSemanticsNodes().size)
+    }
+
+    @Test
+    fun ab1_03_mapToNotesDeactivatesSessionClearsViewModelUnregistersNetworkAndRemovesMapUi() {
+        val sdkInitCalls = AtomicInteger(0)
+        val mapViewCreations = AtomicInteger(0)
+        val mapViewDestroys = AtomicInteger(0)
+        val capturedViewModels = mutableListOf<MapViewModel>()
+        val capturedControllers = mutableListOf<MapEngineController>()
+        val capturedDeps = mutableListOf<MapRuntimeDependencies>()
+
+        lateinit var coordinator: MapActivationCoordinator
+        coordinator = MapActivationCoordinator(
+            runtimeInitializer = MapRuntimeInitializer { sdkInitCalls.incrementAndGet() },
+            dependenciesFactory = { ctx ->
+                MapRuntimeDependencies(ctx).also { capturedDeps.add(it) }
+            },
+            activeSessionContent = { modifier, _, viewModel, onOpenNotes, registerTeardown ->
+                val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+                val controller = remember {
+                    mapViewCreations.incrementAndGet()
+                    viewModel.createMapEngineController(
+                        initialLat = uiState.camera.latitude,
+                        initialLng = uiState.camera.longitude,
+                        initialZoom = uiState.camera.zoom,
+                        initialBearing = uiState.camera.bearing,
+                        onCameraMoved = { lat, lng, zoom, bearing ->
+                            viewModel.onCameraMoved(lat, lng, zoom, bearing)
+                        }
+                    )
+                }
+                remember {
+                    capturedViewModels.add(viewModel)
+                    capturedControllers.add(controller)
+                    true
+                }
+
+                DisposableEffect(controller) {
+                    registerTeardown { controller.release() }
+                    onDispose {
+                        registerTeardown(null)
+                        controller.release()
+                        mapViewDestroys.incrementAndGet()
+                    }
+                }
+
+                Box(modifier = modifier.fillMaxSize()) {
+                    BottomNavigationBar(
+                        isNorthLocked = uiState.camera.isNorthLocked,
+                        onSettingsClick = {},
+                        onSettingsLongClick = {},
+                        onMapsClick = {},
+                        onPlacesClick = {},
+                        onPlacesLongClick = onOpenNotes,
+                        onCompassToggleClick = { viewModel.toggleNorthLock() },
+                        onToolsLongClick = {}
+                    )
+                }
+            }
+        )
+
+        composeTestRule.setContent {
+            AppHostShell(
+                initialDestination = AppHostDestination.MAP,
+                mapFeature = coordinator
+            )
+        }
+        composeTestRule.waitForIdle()
+
+        assertEquals(1, capturedViewModels.size)
+        val firstVm = capturedViewModels.first()
+        val firstController = capturedControllers.first()
+        val firstDeps = capturedDeps.first()
+        assertFalse(firstVm.isCleared)
+        assertFalse(firstController.isReleased)
+        assertTrue(firstDeps.networkMonitor.isCallbackRegistered)
+        assertNotNull(coordinator.sessionViewModelStoreOrNull())
+
+        // Long-press Placemarks button to navigate Map -> Notes
+        composeTestRule.onNodeWithTag("nav_button_places").performTouchInput { longClick() }
+        composeTestRule.waitForIdle()
+
+        // Notes placeholder visible, Map UI completely removed from composition
+        composeTestRule.onNodeWithTag("notes_placeholder_screen").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("notes_return_to_map_button").assertIsDisplayed()
+        assertEquals(0, composeTestRule.onAllNodesWithTag("bottom_nav_bar").fetchSemanticsNodes().size)
+
+        // Session torn down cleanly while process SDK init remains true
+        assertEquals(MapActivationState.Inactive, coordinator.state.value)
+        assertTrue(coordinator.isRuntimeInitialized)
+        assertEquals(1, sdkInitCalls.get())
+        assertEquals(1, mapViewCreations.get())
+        assertEquals(1, mapViewDestroys.get())
+        assertTrue(firstController.isReleased)
+        assertTrue(firstVm.isCleared)
+        assertFalse(firstDeps.networkMonitor.isCallbackRegistered)
+        assertNull(coordinator.dependenciesOrNull())
+        assertNull(coordinator.sessionViewModelStoreOrNull())
+    }
+
+    @Test
+    fun ab1_04_notesToMapCreatesFreshSessionReusesProcessSdkAndRestoresCameraAndPreferences() {
+        val sdkInitCalls = AtomicInteger(0)
+        val mapViewCreations = AtomicInteger(0)
+        val mapViewDestroys = AtomicInteger(0)
+        val capturedViewModels = mutableListOf<MapViewModel>()
+        val capturedControllers = mutableListOf<MapEngineController>()
+        val capturedDeps = mutableListOf<MapRuntimeDependencies>()
+        val capturedStores = mutableListOf<ViewModelStore>()
+
+        lateinit var coordinator: MapActivationCoordinator
+        coordinator = MapActivationCoordinator(
+            runtimeInitializer = MapRuntimeInitializer { sdkInitCalls.incrementAndGet() },
+            dependenciesFactory = { ctx ->
+                MapRuntimeDependencies(ctx).also { capturedDeps.add(it) }
+            },
+            activeSessionContent = { modifier, _, viewModel, onOpenNotes, registerTeardown ->
+                val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+                val controller = remember {
+                    mapViewCreations.incrementAndGet()
+                    viewModel.createMapEngineController(
+                        initialLat = uiState.camera.latitude,
+                        initialLng = uiState.camera.longitude,
+                        initialZoom = uiState.camera.zoom,
+                        initialBearing = uiState.camera.bearing,
+                        onCameraMoved = { lat, lng, zoom, bearing ->
+                            viewModel.onCameraMoved(lat, lng, zoom, bearing)
+                        }
+                    )
+                }
+                remember {
+                    capturedViewModels.add(viewModel)
+                    capturedControllers.add(controller)
+                    coordinator.sessionViewModelStoreOrNull()?.let { capturedStores.add(it) }
+                    true
+                }
+
+                LaunchedEffect(uiState.hasLoadedPreferences) {
+                    if (uiState.hasLoadedPreferences && !viewModel.hasSessionCameraOverride()) {
+                        controller.applyRestoredCamera(
+                            lat = uiState.camera.latitude,
+                            lng = uiState.camera.longitude,
+                            zoom = uiState.camera.zoom,
+                            bearing = uiState.camera.bearing
+                        )
+                    }
+                }
+
+                DisposableEffect(controller) {
+                    registerTeardown { controller.release() }
+                    onDispose {
+                        registerTeardown(null)
+                        controller.release()
+                        mapViewDestroys.incrementAndGet()
+                    }
+                }
+
+                Box(modifier = modifier.fillMaxSize()) {
+                    BottomNavigationBar(
+                        isNorthLocked = uiState.camera.isNorthLocked,
+                        onSettingsClick = {},
+                        onSettingsLongClick = {},
+                        onMapsClick = {},
+                        onPlacesClick = {},
+                        onPlacesLongClick = onOpenNotes,
+                        onCompassToggleClick = { viewModel.toggleNorthLock() },
+                        onToolsLongClick = {}
+                    )
+                }
+            }
+        )
+
+        composeTestRule.setContent {
+            AppHostShell(
+                initialDestination = AppHostDestination.MAP,
+                mapFeature = coordinator
+            )
+        }
+        composeTestRule.waitForIdle()
+        composeTestRule.waitUntil(3_000L) {
+            capturedViewModels.firstOrNull()?.uiState?.value?.hasLoadedPreferences == true
+        }
+
+        val vm1 = capturedViewModels[0]
+        val ctrl1 = capturedControllers[0]
+        val deps1 = capturedDeps[0]
+        val store1 = capturedStores[0]
+
+        // Mutate camera, style, and internet immediately before leaving Map
+        val initialInternet = vm1.uiState.value.isInternetEnabled
+        val targetStyle = MapSourceRepository.OPEN_FREE_MAP_BRIGHT
+        vm1.selectStyle(targetStyle)
+        vm1.toggleInternet()
+        vm1.onCameraMoved(lat = 48.8566, lng = 2.3522, zoom = 14.75, bearing = 33.5)
+
+        // Immediately leave Map -> Notes without waiting on async coroutine scheduling
+        composeTestRule.onNodeWithTag("nav_button_places").performTouchInput { longClick() }
+        composeTestRule.waitForIdle()
+
+        assertEquals(MapActivationState.Inactive, coordinator.state.value)
+        assertTrue(vm1.isCleared)
+        assertTrue(ctrl1.isReleased)
+        assertFalse(deps1.networkMonitor.isCallbackRegistered)
+
+        // Return Notes -> Map
+        composeTestRule.onNodeWithTag("notes_return_to_map_button").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.waitUntil(3_000L) {
+            capturedViewModels.size == 2 && capturedViewModels[1].uiState.value.hasLoadedPreferences
+        }
+
+        val vm2 = capturedViewModels[1]
+        val ctrl2 = capturedControllers[1]
+        val deps2 = capturedDeps[1]
+        val store2 = capturedStores[1]
+
+        // Process SDK initialized once only; fresh Map session objects created
+        assertEquals(1, sdkInitCalls.get())
+        assertEquals(2, mapViewCreations.get())
+        assertEquals(1, mapViewDestroys.get())
+        assertNotSame(vm1, vm2)
+        assertNotSame(ctrl1, ctrl2)
+        assertNotSame(deps1, deps2)
+        assertNotSame(store1, store2)
+        assertFalse(vm2.isCleared)
+        assertFalse(ctrl2.isReleased)
+        assertTrue(deps2.networkMonitor.isCallbackRegistered)
+
+        // Persisted camera, style, and internet preference restored accurately
+        val restoredState = vm2.uiState.value
+        assertEquals(48.8566, restoredState.camera.latitude, 1e-4)
+        assertEquals(2.3522, restoredState.camera.longitude, 1e-4)
+        assertEquals(14.75, restoredState.camera.zoom, 1e-4)
+        assertEquals(33.5, restoredState.camera.bearing, 1e-4)
+        assertEquals(targetStyle.id, restoredState.currentStyle.id)
+        assertEquals(!initialInternet, restoredState.isInternetEnabled)
+    }
+
+    @Test
+    fun ab1_05_tapPlacemarksAndOtherBottomControlsRemainIntact() {
+        val placesTapCount = AtomicInteger(0)
+        val settingsTapCount = AtomicInteger(0)
+        val mapsTapCount = AtomicInteger(0)
+        val compassTapCount = AtomicInteger(0)
+        val openNotesCalls = AtomicInteger(0)
+
+        composeTestRule.setContent {
+            BottomNavigationBar(
+                isNorthLocked = false,
+                onSettingsClick = { settingsTapCount.incrementAndGet() },
+                onSettingsLongClick = {},
+                onMapsClick = { mapsTapCount.incrementAndGet() },
+                onPlacesClick = { placesTapCount.incrementAndGet() },
+                onPlacesLongClick = { openNotesCalls.incrementAndGet() },
+                onCompassToggleClick = { compassTapCount.incrementAndGet() },
+                onToolsLongClick = {}
+            )
+        }
+        composeTestRule.waitForIdle()
+
+        // Tap Placemarks opens Places popup, NOT Notes
+        composeTestRule.onNodeWithTag("nav_button_places").performClick()
+        composeTestRule.onNodeWithTag("nav_button_settings").performClick()
+        composeTestRule.onNodeWithTag("nav_button_maps").performClick()
+        composeTestRule.onNodeWithTag("nav_button_compass_tools").performClick()
+        composeTestRule.waitForIdle()
+
+        assertEquals(1, placesTapCount.get())
+        assertEquals(1, settingsTapCount.get())
+        assertEquals(1, mapsTapCount.get())
+        assertEquals(1, compassTapCount.get())
+        assertEquals(0, openNotesCalls.get())
+
+        // Long-press Placemarks opens Notes
+        composeTestRule.onNodeWithTag("nav_button_places").performTouchInput { longClick() }
+        composeTestRule.waitForIdle()
+        assertEquals(1, openNotesCalls.get())
+        assertEquals(1, placesTapCount.get())
+    }
+
+    @Test
+    fun ab1_06_repeatedSwitchingAndIdempotentDeactivationAreLeakFree() {
+        val sdkInitCalls = AtomicInteger(0)
+        val mapViewCreations = AtomicInteger(0)
+        val mapViewDestroys = AtomicInteger(0)
+        val viewModels = mutableListOf<MapViewModel>()
+        val controllers = mutableListOf<MapEngineController>()
+        val depsList = mutableListOf<MapRuntimeDependencies>()
+
+        val coordinator = MapActivationCoordinator(
+            runtimeInitializer = MapRuntimeInitializer { sdkInitCalls.incrementAndGet() },
+            dependenciesFactory = { ctx ->
+                MapRuntimeDependencies(ctx).also { depsList.add(it) }
+            },
+            activeSessionContent = { modifier, _, viewModel, onOpenNotes, registerTeardown ->
+                val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+                val controller = remember {
+                    mapViewCreations.incrementAndGet()
+                    viewModel.createMapEngineController(
+                        initialLat = uiState.camera.latitude,
+                        initialLng = uiState.camera.longitude,
+                        initialZoom = uiState.camera.zoom,
+                        initialBearing = uiState.camera.bearing,
+                        onCameraMoved = { lat, lng, zoom, bearing ->
+                            viewModel.onCameraMoved(lat, lng, zoom, bearing)
+                        }
+                    )
+                }
+                remember {
+                    viewModels.add(viewModel)
+                    controllers.add(controller)
+                    true
+                }
+                DisposableEffect(controller) {
+                    registerTeardown { controller.release() }
+                    onDispose {
+                        registerTeardown(null)
+                        controller.release()
+                        mapViewDestroys.incrementAndGet()
+                    }
+                }
+                Box(modifier = modifier.fillMaxSize()) {
+                    BottomNavigationBar(
+                        isNorthLocked = uiState.camera.isNorthLocked,
+                        onSettingsClick = {},
+                        onSettingsLongClick = {},
+                        onMapsClick = {},
+                        onPlacesClick = {},
+                        onPlacesLongClick = onOpenNotes,
+                        onCompassToggleClick = { viewModel.toggleNorthLock() },
+                        onToolsLongClick = {}
+                    )
+                }
+            }
+        )
+
+        // Deactivating while already inactive is a safe no-op
+        assertEquals(MapDeactivationResult.AlreadyInactive, coordinator.deactivate())
+        assertEquals(0, coordinator.deactivationCount)
+
+        composeTestRule.setContent {
+            AppHostShell(
+                initialDestination = AppHostDestination.MAP,
+                mapFeature = coordinator
+            )
+        }
+        composeTestRule.waitForIdle()
+
+        // Cycle 1: Map -> Notes -> Map
+        composeTestRule.onNodeWithTag("nav_button_places").performTouchInput { longClick() }
+        composeTestRule.waitForIdle()
+        // Repeated direct deactivate while already inactive must remain idempotent
+        assertEquals(MapDeactivationResult.AlreadyInactive, coordinator.deactivate())
+
+        composeTestRule.onNodeWithTag("notes_return_to_map_button").performClick()
+        composeTestRule.waitForIdle()
+
+        // Cycle 2: Map -> Notes -> Map
+        composeTestRule.onNodeWithTag("nav_button_places").performTouchInput { longClick() }
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("notes_return_to_map_button").performClick()
+        composeTestRule.waitForIdle()
+
+        assertEquals(1, sdkInitCalls.get())
+        assertEquals(3, mapViewCreations.get())
+        assertEquals(2, mapViewDestroys.get())
+        assertEquals(3, viewModels.size)
+        assertEquals(3, depsList.size)
+        assertEquals(2, coordinator.deactivationCount)
+
+        // Stale callbacks on prior controllers/ViewModels do not affect active session
+        val staleController = controllers[0]
+        staleController.onEmptyMapSingleTap = { _, _ -> throw AssertionError("Stale callback should be cleared") }
+        staleController.release()
+        assertTrue(viewModels[0].isCleared)
+        assertTrue(viewModels[1].isCleared)
+        assertFalse(viewModels[2].isCleared)
+        assertFalse(depsList[0].networkMonitor.isCallbackRegistered)
+        assertFalse(depsList[1].networkMonitor.isCallbackRegistered)
+        assertTrue(depsList[2].networkMonitor.isCallbackRegistered)
+    }
+
+    @Test
+    fun ab1_07_activationFailureRecoveryResetsCleanlyAndRetriesWithoutDuplicateInit() {
+        val shouldFail = AtomicBoolean(true)
+        val sdkInitCalls = AtomicInteger(0)
+        val coordinator = MapActivationCoordinator(
+            runtimeInitializer = MapRuntimeInitializer {
+                if (shouldFail.get()) {
+                    throw IllegalStateException("Simulated SDK failure")
+                }
+                sdkInitCalls.incrementAndGet()
+            }
+        )
+
+        val failed = coordinator.activate(context)
+        assertTrue(failed is MapActivationResult.Failed)
+        assertFalse(coordinator.isRuntimeInitialized)
+        assertNull(coordinator.dependenciesOrNull())
+        assertNull(coordinator.sessionViewModelStoreOrNull())
+        assertEquals(0, sdkInitCalls.get())
+
+        // Deactivating from Failed state resets to Inactive cleanly
+        assertEquals(MapDeactivationResult.Deactivated, coordinator.deactivate())
+        assertEquals(MapActivationState.Inactive, coordinator.state.value)
+        assertFalse(coordinator.isRuntimeInitialized)
+
+        // Retry succeeds once runtime becomes available
+        shouldFail.set(false)
+        assertEquals(MapActivationResult.Activated, coordinator.activate(context))
+        assertEquals(MapActivationState.Active, coordinator.state.value)
+        assertTrue(coordinator.isRuntimeInitialized)
+        assertEquals(1, sdkInitCalls.get())
+        assertNotNull(coordinator.dependenciesOrNull())
+        assertNotNull(coordinator.sessionViewModelStoreOrNull())
     }
 }

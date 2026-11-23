@@ -66,7 +66,9 @@ import org.maplibre.android.maps.MapView
 @Composable
 fun MainMapScreen(
     viewModel: MapViewModel,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onOpenNotes: () -> Unit = {},
+    onRegisterControllerTeardown: ((() -> Unit)?) -> Unit = {}
 ) {
     val context = LocalContext.current
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -130,6 +132,18 @@ fun MainMapScreen(
             coroutineScope.launch {
                 snackbarHostState.showSnackbar("Location permission denied. Map functions without location tracking.")
             }
+        }
+    }
+
+    // Sync restored camera once DataStore preferences hydrate on launch / re-activation
+    LaunchedEffect(uiState.hasLoadedPreferences) {
+        if (uiState.hasLoadedPreferences && !viewModel.hasSessionCameraOverride()) {
+            controller.applyRestoredCamera(
+                lat = uiState.camera.latitude,
+                lng = uiState.camera.longitude,
+                zoom = uiState.camera.zoom,
+                bearing = uiState.camera.bearing
+            )
         }
     }
 
@@ -381,6 +395,7 @@ fun MainMapScreen(
                     stage = "GET_MAP_ASYNC_REQUESTED"
                 )
                 mv.getMapAsync { maplibreMap ->
+                    if (controller.isReleased) return@getMapAsync
                     // Stage 7: Map-ready callback received
                     DiagnosticRepository.log(
                         severity = LogSeverity.INFO,
@@ -514,6 +529,10 @@ fun MainMapScreen(
                 }
                 context.registerComponentCallbacks(memoryCallbacks)
 
+                onRegisterControllerTeardown {
+                    controller.release()
+                }
+
                 onDispose {
                     DiagnosticRepository.log(
                         severity = LogSeverity.INFO,
@@ -521,11 +540,12 @@ fun MainMapScreen(
                         description = "DisposableEffect.onDispose invoked for LifecycleOwner#${System.identityHashCode(lifecycleOwner)} (MapView#$mvId)",
                         stage = "COMPOSE_DISPOSAL"
                     )
+                    onRegisterControllerTeardown(null)
                     lifecycleOwner.lifecycle.removeObserver(observer)
                     try {
                         context.unregisterComponentCallbacks(memoryCallbacks)
                     } catch (_: Throwable) {}
-                    controller.visibleTileCoordinator.stop()
+                    controller.release()
                     safeDestroy("COMPOSE_DISPOSAL")
                 }
             }
@@ -650,7 +670,7 @@ fun MainMapScreen(
                 onSettingsLongClick = { viewModel.openModal(ActiveModal.MoreSettings) },
                 onMapsClick = { viewModel.openModal(ActiveModal.MapsPopup) },
                 onPlacesClick = { viewModel.openModal(ActiveModal.PlacesPopup) },
-                onPlacesLongClick = { viewModel.openModal(ActiveModal.MemoryPalaceWorkspace) },
+                onPlacesLongClick = onOpenNotes,
                 onCompassToggleClick = { viewModel.toggleNorthLock() },
                 onToolsLongClick = {
                     viewModel.openModal(ActiveModal.ToolsPopup)

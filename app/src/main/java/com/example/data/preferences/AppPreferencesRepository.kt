@@ -1,15 +1,17 @@
 package com.example.data.preferences
 
 import android.content.Context
+import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.doublePreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
-import androidx.datastore.preferences.preferencesDataStore
+import androidx.datastore.preferences.preferencesDataStoreFile
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
-
-private val Context.dataStore by preferencesDataStore(name = "map_app_preferences")
+import java.util.concurrent.ConcurrentHashMap
 
 data class MapCameraState(
     val latitude: Double = 37.7749,
@@ -30,6 +32,27 @@ data class AppUserPreferences(
 
 class AppPreferencesRepository(private val context: Context) {
 
+    private val dataStore: DataStore<Preferences> = getOrCreateDataStore(context.applicationContext ?: context)
+
+    private companion object {
+        private const val DATA_STORE_NAME = "map_app_preferences"
+        private val storesByPath = ConcurrentHashMap<String, DataStore<Preferences>>()
+
+        fun getOrCreateDataStore(appContext: Context): DataStore<Preferences> {
+            val file = appContext.preferencesDataStoreFile(DATA_STORE_NAME)
+            val key = try {
+                file.canonicalPath
+            } catch (_: Throwable) {
+                file.absolutePath
+            }
+            return storesByPath.computeIfAbsent(key) {
+                PreferenceDataStoreFactory.create(
+                    produceFile = { file }
+                )
+            }
+        }
+    }
+
     private object Keys {
         val LATITUDE = doublePreferencesKey("camera_lat")
         val LONGITUDE = doublePreferencesKey("camera_lng")
@@ -43,7 +66,7 @@ class AppPreferencesRepository(private val context: Context) {
         val SAVED_COMPOSITIONS_JSON = stringPreferencesKey("pref_saved_compositions_json")
     }
 
-    val userPreferencesFlow: Flow<AppUserPreferences> = context.dataStore.data.map { prefs ->
+    val userPreferencesFlow: Flow<AppUserPreferences> = dataStore.data.map { prefs ->
         val lat = prefs[Keys.LATITUDE] ?: 37.7749
         val lng = prefs[Keys.LONGITUDE] ?: -122.4194
         val zoom = prefs[Keys.ZOOM] ?: 11.0
@@ -79,7 +102,7 @@ class AppPreferencesRepository(private val context: Context) {
     }
 
     suspend fun saveCameraState(lat: Double, lng: Double, zoom: Double, bearing: Double) {
-        context.dataStore.edit { prefs ->
+        dataStore.edit { prefs ->
             prefs[Keys.LATITUDE] = lat
             prefs[Keys.LONGITUDE] = lng
             prefs[Keys.ZOOM] = zoom
@@ -88,37 +111,37 @@ class AppPreferencesRepository(private val context: Context) {
     }
 
     suspend fun saveNorthLocked(locked: Boolean) {
-        context.dataStore.edit { prefs ->
+        dataStore.edit { prefs ->
             prefs[Keys.NORTH_LOCKED] = locked
         }
     }
 
     suspend fun saveTopPanelCollapsed(collapsed: Boolean) {
-        context.dataStore.edit { prefs ->
+        dataStore.edit { prefs ->
             prefs[Keys.TOP_PANEL_COLLAPSED] = collapsed
         }
     }
 
     suspend fun saveInternetEnabled(enabled: Boolean) {
-        context.dataStore.edit { prefs ->
+        dataStore.edit { prefs ->
             prefs[Keys.INTERNET_ENABLED] = enabled
         }
     }
 
     suspend fun saveSelectedStyleId(styleId: String) {
-        context.dataStore.edit { prefs ->
+        dataStore.edit { prefs ->
             prefs[Keys.SELECTED_STYLE_ID] = styleId
         }
     }
 
     suspend fun saveActiveCompositionId(compositionId: String) {
-        context.dataStore.edit { prefs ->
+        dataStore.edit { prefs ->
             prefs[Keys.ACTIVE_COMPOSITION_ID] = compositionId
         }
     }
 
     suspend fun saveSavedCompositionsJson(json: String) {
-        context.dataStore.edit { prefs ->
+        dataStore.edit { prefs ->
             prefs[Keys.SAVED_COMPOSITIONS_JSON] = json
         }
     }

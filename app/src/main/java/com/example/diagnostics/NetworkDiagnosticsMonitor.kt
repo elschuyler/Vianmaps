@@ -59,6 +59,9 @@ class NetworkDiagnosticsMonitor(context: Context) {
     @Volatile
     private var isRegistered = false
 
+    internal val isCallbackRegistered: Boolean
+        get() = isRegistered
+
     init {
         ensureRegistered()
     }

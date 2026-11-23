@@ -40,9 +40,17 @@ import com.example.data.storage.OverallStorageReport
 import com.example.map.composition.MapComposition
 import com.example.map.composition.MapCompositionDefaults
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.atomic.AtomicBoolean
 
 data class PoiCategoryOption(
     val category: String,
@@ -141,7 +149,8 @@ data class MapUiState(
     val mapContextMenuState: MapContextMenuUiState? = null,
     val savedAreaEditorState: SavedAreaEditorState? = null,
     val plannedActionNotice: PlannedActionNoticeState? = null,
-    val userFeedbackMessage: String? = null
+    val userFeedbackMessage: String? = null,
+    val hasLoadedPreferences: Boolean = false
 )
 
 sealed interface ActiveModal {
@@ -179,6 +188,23 @@ class MapViewModel(
     private var areaLookupJob: Job? = null
     private var contextLookupJob: Job? = null
     private var onlineOverrideForTesting: Boolean? = null
+
+    private val hasLocalCameraOverride = AtomicBoolean(false)
+    private val hasPendingCameraPersistence = AtomicBoolean(false)
+    private val hasLocalNorthLockOverride = AtomicBoolean(false)
+    private val hasLocalInternetOverride = AtomicBoolean(false)
+    private val hasLocalStyleOverride = AtomicBoolean(false)
+    private val hasLocalCompositionOverride = AtomicBoolean(false)
+    private val hasLocalTopPanelOverride = AtomicBoolean(false)
+
+    private val pendingPrefJobsLock = Any()
+    private val pendingPreferenceJobs = LinkedHashSet<Job>()
+
+    @Volatile
+    internal var isCleared: Boolean = false
+        private set
+
+    fun hasSessionCameraOverride(): Boolean = hasLocalCameraOverride.get()
 
     fun createMapEngineController(
         initialLat: Double,
@@ -260,24 +286,44 @@ class MapViewModel(
             val compositions = MapComposition.listFromJsonString(savedPrefs.savedCompositionsJson)
             val activeComp = compositions.find { it.id == savedPrefs.activeCompositionId }
                 ?: MapCompositionDefaults.defaultComposition
-            val style = activeComp.baseStyle
-
-            AppNetworkPolicy.setInternetEnabled(savedPrefs.isInternetEnabled)
+            val resolvedStyle = MapSourceRepository.availableStyles.find { it.id == savedPrefs.selectedStyleId }
+                ?: activeComp.baseStyle
 
             val currentUi = _uiState.value
+            val resolvedInternet = if (hasLocalInternetOverride.get()) {
+                currentUi.isInternetEnabled
+            } else {
+                savedPrefs.isInternetEnabled
+            }
+            AppNetworkPolicy.setInternetEnabled(resolvedInternet)
+
+            val resolvedCamera = if (hasLocalCameraOverride.get()) {
+                val curCam = currentUi.camera
+                if (hasLocalNorthLockOverride.get()) {
+                    curCam
+                } else {
+                    curCam.copy(isNorthLocked = savedPrefs.cameraState.isNorthLocked)
+                }
+            } else if (hasLocalNorthLockOverride.get()) {
+                savedPrefs.cameraState.copy(isNorthLocked = currentUi.camera.isNorthLocked)
+            } else {
+                savedPrefs.cameraState
+            }
+
             val latestHighlight = currentUi.categoryHighlightState
-            val seededZoom = if (latestHighlight.lastViewport != null) {
+            val seededZoom = if (latestHighlight.lastViewport != null || hasLocalCameraOverride.get()) {
                 latestHighlight.currentZoom
             } else {
-                savedPrefs.cameraState.zoom
+                resolvedCamera.zoom
             }
             _uiState.value = currentUi.copy(
-                camera = savedPrefs.cameraState,
-                isTopPanelCollapsed = savedPrefs.isTopPanelCollapsed,
-                isInternetEnabled = savedPrefs.isInternetEnabled,
-                currentStyle = style,
-                activeComposition = activeComp,
+                camera = resolvedCamera,
+                isTopPanelCollapsed = if (hasLocalTopPanelOverride.get()) currentUi.isTopPanelCollapsed else savedPrefs.isTopPanelCollapsed,
+                isInternetEnabled = resolvedInternet,
+                currentStyle = if (hasLocalStyleOverride.get()) currentUi.currentStyle else resolvedStyle,
+                activeComposition = if (hasLocalCompositionOverride.get()) currentUi.activeComposition else activeComp,
                 savedCompositions = compositions,
+                hasLoadedPreferences = true,
                 categoryHighlightState = latestHighlight.copy(
                     currentZoom = seededZoom,
                     isPausedByZoom = seededZoom < latestHighlight.minHighlightZoom
@@ -352,7 +398,57 @@ class MapViewModel(
         )
     }
 
+    private fun launchPreferenceWrite(block: suspend () -> Unit): Job {
+        val job = viewModelScope.launch {
+            withContext(NonCancellable) {
+                block()
+            }
+        }
+        synchronized(pendingPrefJobsLock) {
+            pendingPreferenceJobs.add(job)
+        }
+        job.invokeOnCompletion {
+            synchronized(pendingPrefJobsLock) {
+                pendingPreferenceJobs.remove(job)
+            }
+        }
+        return job
+    }
+
+    fun flushPendingStateBlocking(timeoutMs: Long = 2_000L) {
+        val jobsSnapshot = synchronized(pendingPrefJobsLock) {
+            pendingPreferenceJobs.toList()
+        }
+        val needsCameraFlush = hasPendingCameraPersistence.get()
+        if (jobsSnapshot.isEmpty() && !needsCameraFlush) return
+
+        runBlocking(Dispatchers.IO) {
+            withTimeoutOrNull(timeoutMs) {
+                jobsSnapshot.forEach { job ->
+                    if (job.isActive) {
+                        try {
+                            job.join()
+                        } catch (_: CancellationException) {
+                        }
+                    }
+                }
+                if (hasPendingCameraPersistence.get() || needsCameraFlush) {
+                    val latestCam = _uiState.value.camera
+                    preferencesRepository.saveCameraState(
+                        latestCam.latitude,
+                        latestCam.longitude,
+                        latestCam.zoom,
+                        latestCam.bearing
+                    )
+                    hasPendingCameraPersistence.set(false)
+                }
+            }
+        }
+    }
+
     fun onCameraMoved(lat: Double, lng: Double, zoom: Double, bearing: Double) {
+        hasLocalCameraOverride.set(true)
+        hasPendingCameraPersistence.set(true)
         val current = _uiState.value.camera
         val updated = current.copy(
             latitude = lat,
@@ -362,24 +458,34 @@ class MapViewModel(
         )
         _uiState.value = _uiState.value.copy(camera = updated)
 
-        viewModelScope.launch {
+        launchPreferenceWrite {
             preferencesRepository.saveCameraState(lat, lng, zoom, bearing)
+            val latest = _uiState.value.camera
+            if (latest.latitude == lat &&
+                latest.longitude == lng &&
+                latest.zoom == zoom &&
+                latest.bearing == bearing
+            ) {
+                hasPendingCameraPersistence.set(false)
+            }
         }
     }
 
     fun toggleTopPanel() {
+        hasLocalTopPanelOverride.set(true)
         val newCollapsed = !_uiState.value.isTopPanelCollapsed
         _uiState.value = _uiState.value.copy(isTopPanelCollapsed = newCollapsed)
-        viewModelScope.launch {
+        launchPreferenceWrite {
             preferencesRepository.saveTopPanelCollapsed(newCollapsed)
         }
     }
 
     fun toggleInternet() {
+        hasLocalInternetOverride.set(true)
         val newInternet = !_uiState.value.isInternetEnabled
         AppNetworkPolicy.setInternetEnabled(newInternet)
         _uiState.value = _uiState.value.copy(isInternetEnabled = newInternet)
-        viewModelScope.launch {
+        launchPreferenceWrite {
             preferencesRepository.saveInternetEnabled(newInternet)
         }
     }
@@ -426,18 +532,20 @@ class MapViewModel(
     }
 
     fun toggleNorthLock() {
+        hasLocalNorthLockOverride.set(true)
         val newLocked = !_uiState.value.camera.isNorthLocked
         val updatedCamera = _uiState.value.camera.copy(
             isNorthLocked = newLocked,
             bearing = if (newLocked) 0.0 else _uiState.value.camera.bearing
         )
         _uiState.value = _uiState.value.copy(camera = updatedCamera)
-        viewModelScope.launch {
+        launchPreferenceWrite {
             preferencesRepository.saveNorthLocked(newLocked)
         }
     }
 
     fun selectStyle(style: MapStyleDefinition) {
+        hasLocalStyleOverride.set(true)
         _uiState.value = _uiState.value.copy(currentStyle = style)
         DiagnosticRepository.log(
             severity = LogSeverity.INFO,
@@ -445,12 +553,14 @@ class MapViewModel(
             description = "Selected style: ${style.displayName} (${style.providerName})",
             stage = "STYLE_SWITCH"
         )
-        viewModelScope.launch {
+        launchPreferenceWrite {
             preferencesRepository.saveSelectedStyleId(style.id)
         }
     }
 
     fun selectComposition(composition: MapComposition, controller: MapEngineController? = null) {
+        hasLocalCompositionOverride.set(true)
+        hasLocalStyleOverride.set(true)
         _uiState.value = _uiState.value.copy(
             activeComposition = composition,
             currentStyle = composition.baseStyle
@@ -461,7 +571,7 @@ class MapViewModel(
             description = "Selected composition: ${composition.name} (Base: ${composition.baseStyle.displayName})",
             stage = "COMPOSITION_SWITCH"
         )
-        viewModelScope.launch {
+        launchPreferenceWrite {
             preferencesRepository.saveActiveCompositionId(composition.id)
             preferencesRepository.saveSelectedStyleId(composition.baseStyleId)
         }
@@ -2333,6 +2443,16 @@ class MapViewModel(
     }
 
     override fun onCleared() {
+        isCleared = true
+        if (hasPendingCameraPersistence.getAndSet(false)) {
+            val cam = _uiState.value.camera
+            CoroutineScope(SupervisorJob() + Dispatchers.IO + NonCancellable).launch {
+                try {
+                    preferencesRepository.saveCameraState(cam.latitude, cam.longitude, cam.zoom, cam.bearing)
+                } catch (_: Throwable) {
+                }
+            }
+        }
         super.onCleared()
         searchJob?.cancel()
         categoryHighlightJob?.cancel()

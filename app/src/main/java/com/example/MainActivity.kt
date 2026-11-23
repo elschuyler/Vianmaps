@@ -12,6 +12,9 @@ import androidx.activity.enableEdgeToEdge
 import com.example.diagnostics.GlobalErrorCatcher
 import com.example.diagnostics.DiagnosticRepository
 import com.example.diagnostics.LogSeverity
+import com.example.host.AppHostDestination
+import com.example.host.AppHostShell
+import com.example.host.resolveInitialHostDestination
 import com.example.map.activation.MapActivationBoundary
 import com.example.map.activation.MapFeatureActivation
 import com.example.ui.theme.MyApplicationTheme
@@ -35,8 +38,11 @@ class MainActivity : ComponentActivity() {
         // Device hardware and graphics capability diagnostic audit
         logDeviceHardwareDiagnostics()
 
-        // Explicitly request Map activation through the host-facing activation seam
-        mapFeature.activate(this)
+        // Resolve initial destination BEFORE activating Map so launching into Notes never initializes Map
+        val initialDestination = resolveInitialHostDestination(intent)
+        if (initialDestination == AppHostDestination.MAP) {
+            mapFeature.activate(this)
+        }
 
         // Force light status bar appearance (dark icons) so system bar icons remain readable
         enableEdgeToEdge(
@@ -48,7 +54,10 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             MyApplicationTheme {
-                mapFeature.Content()
+                AppHostShell(
+                    initialDestination = initialDestination,
+                    mapFeature = mapFeature
+                )
             }
         }
     }

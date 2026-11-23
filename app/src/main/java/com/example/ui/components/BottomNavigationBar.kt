@@ -37,7 +37,7 @@ import com.example.ui.theme.SkyBluePrimary
  * Restored to the 4 original Milestone 1 buttons:
  * 1. Tune / Settings: Tap -> Settings popup (3 entries), Long-press -> More Settings workspace directly
  * 2. Map: Tap -> Maps & Layers popover
- * 3. PinDrop / Places: Tap -> Places popover, Long-press -> Memory Palace workspace
+ * 3. PinDrop / Places: Tap -> Places popover, Long-press -> Notes destination
  * 4. Compass / Tools: Tap -> Toggle North Lock, Long-press -> Tools popover
  *
  * Features:
@@ -91,7 +91,7 @@ fun BottomNavigationBar(
                 onClick = onMapsClick
             )
 
-            // 3. Places / Waypoints (Tap -> Places Popover, Long-press -> Memory Palace)
+            // 3. Places / Waypoints (Tap -> Places Popover, Long-press -> Notes)
             BottomBarIconButton(
                 icon = Icons.Default.PinDrop,
                 contentDescription = "Places & Waypoints",
