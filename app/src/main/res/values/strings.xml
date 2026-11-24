@@ -3,4 +3,13 @@
     <string name="notes_placeholder_title">Notes</string>
     <string name="notes_placeholder_subtitle">Notes workspace will be implemented in a later phase.</string>
     <string name="notes_return_to_map">Return to Map</string>
+    <string name="map_activation_loading">Starting map…</string>
+    <string name="map_activation_error_title">Unable to Start Map</string>
+    <string name="map_activation_error_fallback">Map initialization encountered an unexpected error.</string>
+    <string name="map_activation_retry">Retry</string>
+    <string name="map_activation_open_notes">Open Notes</string>
+    <string name="map_deactivation_error_title">Could Not Save Map State</string>
+    <string name="map_deactivation_error_body">Failed to save your latest camera or settings before leaving the map: %1$s</string>
+    <string name="map_deactivation_retry">Retry</string>
+    <string name="map_deactivation_stay">Stay on Map</string>
 </resources>

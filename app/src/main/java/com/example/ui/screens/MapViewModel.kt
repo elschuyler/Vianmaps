@@ -40,16 +40,13 @@ import com.example.data.storage.OverallStorageReport
 import com.example.map.composition.MapComposition
 import com.example.map.composition.MapCompositionDefaults
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.atomic.AtomicBoolean
 
 data class PoiCategoryOption(
@@ -199,6 +196,12 @@ class MapViewModel(
 
     private val pendingPrefJobsLock = Any()
     private val pendingPreferenceJobs = LinkedHashSet<Job>()
+    private val cameraStateLock = Any()
+    private val preferenceWriteMutex = Mutex()
+    private val cameraPersistenceFrozen = AtomicBoolean(false)
+
+    @Volatile
+    private var lastNonCameraWriteError: Throwable? = null
 
     @Volatile
     internal var isCleared: Boolean = false
@@ -398,10 +401,31 @@ class MapViewModel(
         )
     }
 
-    private fun launchPreferenceWrite(block: suspend () -> Unit): Job {
+    private fun launchPreferenceWrite(
+        isCameraWrite: Boolean = false,
+        block: suspend () -> Unit
+    ): Job {
         val job = viewModelScope.launch {
-            withContext(NonCancellable) {
-                block()
+            try {
+                preferenceWriteMutex.withLock {
+                    block()
+                }
+                if (!isCameraWrite) {
+                    lastNonCameraWriteError = null
+                }
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                if (!isCameraWrite) {
+                    lastNonCameraWriteError = t
+                }
+                DiagnosticRepository.log(
+                    severity = LogSeverity.ERROR,
+                    source = "MapViewModel",
+                    description = "Preference write failed: ${t.message}",
+                    stage = "PREF_WRITE_FAILED",
+                    throwable = t
+                )
             }
         }
         synchronized(pendingPrefJobsLock) {
@@ -415,58 +439,120 @@ class MapViewModel(
         return job
     }
 
-    fun flushPendingStateBlocking(timeoutMs: Long = 2_000L) {
+    /**
+     * Ordered asynchronous shutdown flush executed before tearing down an outgoing Map session:
+     * 1. Stop accepting new camera persistence updates from the outgoing session.
+     * 2. Atomically capture the latest camera state and dirty flag.
+     * 3. Await earlier queued preference writes so they settle and cannot overwrite the final camera state afterward.
+     * 4. Persist the final camera state only if modified in this session (preserving existing saved camera on unmoved launches).
+     * 5. Surface cancellation or IO persistence failures explicitly instead of silently succeeding.
+     */
+    suspend fun prepareAndFlushForDeactivation(): Result<Unit> {
+        val finalCam: MapCameraState
+        val needsCameraFlush: Boolean
+        synchronized(cameraStateLock) {
+            cameraPersistenceFrozen.set(true)
+            finalCam = _uiState.value.camera
+            needsCameraFlush = hasPendingCameraPersistence.get()
+        }
         val jobsSnapshot = synchronized(pendingPrefJobsLock) {
             pendingPreferenceJobs.toList()
         }
-        val needsCameraFlush = hasPendingCameraPersistence.get()
-        if (jobsSnapshot.isEmpty() && !needsCameraFlush) return
 
-        runBlocking(Dispatchers.IO) {
-            withTimeoutOrNull(timeoutMs) {
-                jobsSnapshot.forEach { job ->
-                    if (job.isActive) {
-                        try {
-                            job.join()
-                        } catch (_: CancellationException) {
+        return try {
+            jobsSnapshot.forEach { job ->
+                if (job.isActive) {
+                    job.join()
+                }
+            }
+            preferenceWriteMutex.withLock {
+                withContext(Dispatchers.IO) {
+                    val priorNonCameraError = lastNonCameraWriteError
+                    if (priorNonCameraError != null) {
+                        throw priorNonCameraError
+                    }
+                    if (needsCameraFlush) {
+                        preferencesRepository.saveCameraState(
+                            finalCam.latitude,
+                            finalCam.longitude,
+                            finalCam.zoom,
+                            finalCam.bearing
+                        )
+                        synchronized(cameraStateLock) {
+                            hasPendingCameraPersistence.set(false)
                         }
                     }
                 }
-                if (hasPendingCameraPersistence.get() || needsCameraFlush) {
-                    val latestCam = _uiState.value.camera
-                    preferencesRepository.saveCameraState(
-                        latestCam.latitude,
-                        latestCam.longitude,
-                        latestCam.zoom,
-                        latestCam.bearing
-                    )
-                    hasPendingCameraPersistence.set(false)
+            }
+            Result.success(Unit)
+        } catch (ce: CancellationException) {
+            synchronized(cameraStateLock) {
+                if (!isCleared) {
+                    cameraPersistenceFrozen.set(false)
                 }
             }
+            throw ce
+        } catch (t: Throwable) {
+            synchronized(cameraStateLock) {
+                if (!isCleared) {
+                    cameraPersistenceFrozen.set(false)
+                }
+            }
+            DiagnosticRepository.log(
+                severity = LogSeverity.ERROR,
+                source = "MapViewModel",
+                description = "Camera/preference flush failed during deactivation: ${t.message}",
+                stage = "SHUTDOWN_FLUSH_FAILED",
+                throwable = t
+            )
+            Result.failure(t)
         }
     }
 
     fun onCameraMoved(lat: Double, lng: Double, zoom: Double, bearing: Double) {
-        hasLocalCameraOverride.set(true)
-        hasPendingCameraPersistence.set(true)
-        val current = _uiState.value.camera
-        val updated = current.copy(
-            latitude = lat,
-            longitude = lng,
-            zoom = zoom,
-            bearing = bearing
-        )
-        _uiState.value = _uiState.value.copy(camera = updated)
+        synchronized(cameraStateLock) {
+            if (isCleared || cameraPersistenceFrozen.get()) {
+                return
+            }
+            hasLocalCameraOverride.set(true)
+            hasPendingCameraPersistence.set(true)
+            val current = _uiState.value.camera
+            val updated = current.copy(
+                latitude = lat,
+                longitude = lng,
+                zoom = zoom,
+                bearing = bearing
+            )
+            _uiState.value = _uiState.value.copy(camera = updated)
+        }
 
-        launchPreferenceWrite {
-            preferencesRepository.saveCameraState(lat, lng, zoom, bearing)
-            val latest = _uiState.value.camera
-            if (latest.latitude == lat &&
-                latest.longitude == lng &&
-                latest.zoom == zoom &&
-                latest.bearing == bearing
-            ) {
-                hasPendingCameraPersistence.set(false)
+        launchPreferenceWrite(isCameraWrite = true) {
+            val target = synchronized(cameraStateLock) {
+                if (cameraPersistenceFrozen.get() || isCleared || !hasPendingCameraPersistence.get()) {
+                    null
+                } else {
+                    _uiState.value.camera
+                }
+            } ?: return@launchPreferenceWrite
+
+            preferencesRepository.saveCameraState(
+                target.latitude,
+                target.longitude,
+                target.zoom,
+                target.bearing
+            )
+
+            synchronized(cameraStateLock) {
+                if (!cameraPersistenceFrozen.get()) {
+                    val latest = _uiState.value.camera
+                    if (latest.latitude == target.latitude &&
+                        latest.longitude == target.longitude &&
+                        latest.zoom == target.zoom &&
+                        latest.bearing == target.bearing
+                    ) {
+                        hasPendingCameraPersistence.set(false)
+                    }
+                }
             }
         }
     }
@@ -595,7 +681,7 @@ class MapViewModel(
             activeComposition = if (isActive) composition else _uiState.value.activeComposition
         )
 
-        viewModelScope.launch {
+        launchPreferenceWrite {
             val jsonString = MapComposition.listToJsonString(currentList)
             preferencesRepository.saveSavedCompositionsJson(jsonString)
         }
@@ -622,7 +708,7 @@ class MapViewModel(
             activeComposition = newActive
         )
 
-        viewModelScope.launch {
+        launchPreferenceWrite {
             val jsonString = MapComposition.listToJsonString(updatedList)
             preferencesRepository.saveSavedCompositionsJson(jsonString)
         }
@@ -639,7 +725,7 @@ class MapViewModel(
         val currentList = _uiState.value.savedCompositions + duplicate
         _uiState.value = _uiState.value.copy(savedCompositions = currentList)
 
-        viewModelScope.launch {
+        launchPreferenceWrite {
             val jsonString = MapComposition.listToJsonString(currentList)
             preferencesRepository.saveSavedCompositionsJson(jsonString)
         }
@@ -660,7 +746,7 @@ class MapViewModel(
             activeComposition = updatedActive
         )
 
-        viewModelScope.launch {
+        launchPreferenceWrite {
             val jsonString = MapComposition.listToJsonString(updatedList)
             preferencesRepository.saveSavedCompositionsJson(jsonString)
         }
@@ -2444,15 +2530,7 @@ class MapViewModel(
 
     override fun onCleared() {
         isCleared = true
-        if (hasPendingCameraPersistence.getAndSet(false)) {
-            val cam = _uiState.value.camera
-            CoroutineScope(SupervisorJob() + Dispatchers.IO + NonCancellable).launch {
-                try {
-                    preferencesRepository.saveCameraState(cam.latitude, cam.longitude, cam.zoom, cam.bearing)
-                } catch (_: Throwable) {
-                }
-            }
-        }
+        cameraPersistenceFrozen.set(true)
         super.onCleared()
         searchJob?.cancel()
         categoryHighlightJob?.cancel()

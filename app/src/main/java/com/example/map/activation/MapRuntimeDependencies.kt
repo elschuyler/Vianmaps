@@ -30,7 +30,8 @@ import com.example.ui.screens.MapViewModel
 class MapRuntimeDependencies(
     context: Context,
     private val databaseProvider: (Context) -> AppDatabase = { AppDatabase.getInstance(it) },
-    private val remoteGatewayProvider: () -> AreaRemoteLookupGateway = { HttpAreaRemoteLookupGateway() }
+    private val remoteGatewayProvider: () -> AreaRemoteLookupGateway = { HttpAreaRemoteLookupGateway() },
+    private val preferencesRepositoryProvider: (Context) -> AppPreferencesRepository = { AppPreferencesRepository(it) }
 ) {
     val appContext: Context = context.applicationContext ?: context
 
@@ -39,7 +40,7 @@ class MapRuntimeDependencies(
     }
 
     val preferencesRepository: AppPreferencesRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
-        AppPreferencesRepository(appContext)
+        preferencesRepositoryProvider(appContext)
     }
 
     val tileStorageManager: TileStorageManager by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {

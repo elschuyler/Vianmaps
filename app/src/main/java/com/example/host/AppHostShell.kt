@@ -16,16 +16,19 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.outlined.Description
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -34,10 +37,15 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.map.activation.MapActivationBoundary
+import com.example.map.activation.MapActivationLoadingScreen
+import com.example.map.activation.MapActivationRecoveryScreen
 import com.example.map.activation.MapActivationState
+import com.example.map.activation.MapDeactivationResult
 import com.example.map.activation.MapFeatureActivation
+import kotlinx.coroutines.launch
 
 /**
  * Top-level host destinations for Vian Maps.
@@ -62,8 +70,8 @@ fun resolveInitialHostDestination(intent: Intent?): AppHostDestination {
 }
 
 /**
- * Lightweight host destination shell managing independent activation and deactivation
- * between Map and Notes without keeping Map UI composed beneath Notes.
+ * Lightweight host destination shell managing independent activation and ordered asynchronous
+ * deactivation between Map and Notes without keeping Map UI composed beneath Notes.
  */
 @Composable
 fun AppHostShell(
@@ -72,18 +80,41 @@ fun AppHostShell(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+    val activationState by mapFeature.state.collectAsStateWithLifecycle()
     var currentDestination by remember { mutableStateOf(initialDestination) }
+    var isTransitioningToNotes by remember { mutableStateOf(false) }
+    var deactivationErrorMessage by remember { mutableStateOf<String?>(null) }
 
     val openMap: () -> Unit = {
-        if (mapFeature.state.value !is MapActivationState.Active) {
+        deactivationErrorMessage = null
+        val currentState = mapFeature.state.value
+        if (currentState !is MapActivationState.Active && currentState !is MapActivationState.Activating) {
             mapFeature.activate(context)
         }
         currentDestination = AppHostDestination.MAP
     }
 
     val openNotes: () -> Unit = {
-        currentDestination = AppHostDestination.NOTES
-        mapFeature.deactivate()
+        if (!isTransitioningToNotes) {
+            deactivationErrorMessage = null
+            isTransitioningToNotes = true
+            coroutineScope.launch {
+                try {
+                    when (val result = mapFeature.deactivate()) {
+                        is MapDeactivationResult.Deactivated,
+                        is MapDeactivationResult.AlreadyInactive -> {
+                            currentDestination = AppHostDestination.NOTES
+                        }
+                        is MapDeactivationResult.Failed -> {
+                            deactivationErrorMessage = result.message
+                        }
+                    }
+                } finally {
+                    isTransitioningToNotes = false
+                }
+            }
+        }
     }
 
     LaunchedEffect(currentDestination) {
@@ -96,10 +127,29 @@ fun AppHostShell(
 
     when (currentDestination) {
         AppHostDestination.MAP -> {
-            mapFeature.Content(
-                modifier = modifier.fillMaxSize(),
-                onOpenNotes = openNotes
-            )
+            when (val actState = activationState) {
+                is MapActivationState.Active -> {
+                    mapFeature.Content(
+                        modifier = modifier.fillMaxSize(),
+                        onOpenNotes = openNotes
+                    )
+                }
+                is MapActivationState.Failed -> {
+                    MapActivationRecoveryScreen(
+                        failureMessage = actState.message,
+                        onRetry = openMap,
+                        onOpenNotes = openNotes,
+                        modifier = modifier.fillMaxSize()
+                    )
+                }
+                is MapActivationState.Activating,
+                is MapActivationState.Inactive -> {
+                    MapActivationLoadingScreen(
+                        modifier = modifier.fillMaxSize(),
+                        onOpenNotes = openNotes
+                    )
+                }
+            }
         }
         AppHostDestination.NOTES -> {
             NotesPlaceholderScreen(
@@ -107,6 +157,45 @@ fun AppHostShell(
                 modifier = modifier.fillMaxSize()
             )
         }
+    }
+
+    val pendingDeactivationError = deactivationErrorMessage
+    if (pendingDeactivationError != null) {
+        AlertDialog(
+            onDismissRequest = { deactivationErrorMessage = null },
+            modifier = Modifier.testTag("map_deactivation_error_dialog"),
+            title = {
+                Text(text = stringResource(id = R.string.map_deactivation_error_title))
+            },
+            text = {
+                Text(
+                    text = stringResource(
+                        id = R.string.map_deactivation_error_body,
+                        pendingDeactivationError
+                    )
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = openNotes,
+                    modifier = Modifier
+                        .heightIn(min = 48.dp)
+                        .testTag("map_deactivation_retry_button")
+                ) {
+                    Text(text = stringResource(id = R.string.map_deactivation_retry))
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { deactivationErrorMessage = null },
+                    modifier = Modifier
+                        .heightIn(min = 48.dp)
+                        .testTag("map_deactivation_dismiss_button")
+                ) {
+                    Text(text = stringResource(id = R.string.map_deactivation_stay))
+                }
+            }
+        )
     }
 }
 

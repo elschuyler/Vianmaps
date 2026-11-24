@@ -30,9 +30,10 @@ data class AppUserPreferences(
     val savedCompositionsJson: String? = null
 )
 
-class AppPreferencesRepository(private val context: Context) {
-
+class AppPreferencesRepository(
+    context: Context,
     private val dataStore: DataStore<Preferences> = getOrCreateDataStore(context.applicationContext ?: context)
+) {
 
     private companion object {
         private const val DATA_STORE_NAME = "map_app_preferences"

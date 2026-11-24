@@ -43,6 +43,8 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.map.engine.MapEngineController
+import com.example.map.engine.MapViewLifecycleCoordinator
+import com.example.map.engine.NativeMapViewLifecycleTarget
 import com.example.ui.components.AppModalManager
 import com.example.ui.components.AreaDetailsPopup
 import com.example.ui.components.BottomNavigationBar
@@ -255,9 +257,13 @@ fun MainMapScreen(
             // Create and retain exactly one MapView instance across all recompositions
             val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
 
-            val mapView = remember {
+            val mapViewHolder = remember {
                 val mv = MapView(context)
                 val mvId = System.identityHashCode(mv)
+                val lifecycleCoordinator = MapViewLifecycleCoordinator(
+                    target = NativeMapViewLifecycleTarget(mv),
+                    viewIdLabel = "MapView#$mvId"
+                )
                 DiagnosticRepository.log(
                     severity = LogSeverity.INFO,
                     source = "MainMapScreen",
@@ -378,14 +384,8 @@ fun MainMapScreen(
                     )
                 }
 
-                // Stage 4: MapView "onCreate()" completed
-                mv.onCreate(null)
-                DiagnosticRepository.log(
-                    severity = LogSeverity.INFO,
-                    source = "MainMapScreen",
-                    description = "MapView 'onCreate()' completed (MapView#$mvId)",
-                    stage = "MAPVIEW_ONCREATE"
-                )
+                // Stage 4: MapView "onCreate()" completed via state-aware lifecycle coordinator
+                lifecycleCoordinator.dispatchCreate()
 
                 // Stage 6: "getMapAsync()" requested
                 DiagnosticRepository.log(
@@ -395,7 +395,7 @@ fun MainMapScreen(
                     stage = "GET_MAP_ASYNC_REQUESTED"
                 )
                 mv.getMapAsync { maplibreMap ->
-                    if (controller.isReleased) return@getMapAsync
+                    if (controller.isReleased || lifecycleCoordinator.isDestroyed) return@getMapAsync
                     // Stage 7: Map-ready callback received
                     DiagnosticRepository.log(
                         severity = LogSeverity.INFO,
@@ -433,8 +433,10 @@ fun MainMapScreen(
                     )
                 }
 
-                mv
+                mv to lifecycleCoordinator
             }
+            val mapView = mapViewHolder.first
+            val mapLifecycleCoordinator = mapViewHolder.second
 
             // Single Lifecycle Owner for MapView:
             // Keyed ONLY on lifecycleOwner (NOT mapView or mutableState), preventing premature disposal on recomposition.
@@ -447,35 +449,6 @@ fun MainMapScreen(
                     stage = "DISPOSABLE_EFFECT_ENTRY"
                 )
 
-                var destructionReason: String? = null
-                fun safeDestroy(reason: String) {
-                    if (destructionReason == null) {
-                        destructionReason = reason
-                        DiagnosticRepository.log(
-                            severity = LogSeverity.INFO,
-                            source = "MainMapScreen",
-                            description = "MapView destruction initiated by: $reason (MapView#$mvId)",
-                            stage = "DESTROYED"
-                        )
-                        try {
-                            mapView.onDestroy()
-                        } catch (e: Throwable) {
-                            DiagnosticRepository.log(
-                                severity = LogSeverity.WARNING,
-                                source = "MainMapScreen",
-                                description = "Exception during MapView.onDestroy: ${e.message}",
-                                throwable = e
-                            )
-                        }
-                    } else {
-                        DiagnosticRepository.log(
-                            severity = LogSeverity.DEBUG,
-                            source = "MainMapScreen",
-                            description = "Ignored redundant destruction request from $reason (already destroyed by $destructionReason)"
-                        )
-                    }
-                }
-
                 val observer = LifecycleEventObserver { _, event ->
                     DiagnosticRepository.log(
                         severity = LogSeverity.INFO,
@@ -484,24 +457,14 @@ fun MainMapScreen(
                         stage = "LIFECYCLE_EVENT"
                     )
                     when (event) {
-                        Lifecycle.Event.ON_START -> {
-                            mapView.onStart()
-                            DiagnosticRepository.log(LogSeverity.INFO, "MainMapScreen", "MapView.onStart() dispatched (MapView#$mvId)", stage = "LIFECYCLE_STARTED")
-                        }
-                        Lifecycle.Event.ON_RESUME -> {
-                            mapView.onResume()
-                            DiagnosticRepository.log(LogSeverity.INFO, "MainMapScreen", "MapView.onResume() dispatched (MapView#$mvId)", stage = "LIFECYCLE_RESUMED")
-                        }
-                        Lifecycle.Event.ON_PAUSE -> {
-                            mapView.onPause()
-                            DiagnosticRepository.log(LogSeverity.INFO, "MainMapScreen", "MapView.onPause() dispatched (MapView#$mvId)", stage = "LIFECYCLE_PAUSED")
-                        }
-                        Lifecycle.Event.ON_STOP -> {
-                            mapView.onStop()
-                            DiagnosticRepository.log(LogSeverity.INFO, "MainMapScreen", "MapView.onStop() dispatched (MapView#$mvId)", stage = "LIFECYCLE_STOPPED")
-                        }
+                        Lifecycle.Event.ON_START -> mapLifecycleCoordinator.dispatchStart()
+                        Lifecycle.Event.ON_RESUME -> mapLifecycleCoordinator.dispatchResume()
+                        Lifecycle.Event.ON_PAUSE -> mapLifecycleCoordinator.dispatchPause()
+                        Lifecycle.Event.ON_STOP -> mapLifecycleCoordinator.dispatchStop()
                         Lifecycle.Event.ON_DESTROY -> {
-                            safeDestroy("ACTIVITY_ON_DESTROY")
+                            mapLifecycleCoordinator.dispatchDestroy("ACTIVITY_ON_DESTROY") {
+                                controller.release()
+                            }
                         }
                         else -> Unit
                     }
@@ -517,13 +480,13 @@ fun MainMapScreen(
                 val memoryCallbacks = object : android.content.ComponentCallbacks2 {
                     override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {}
                     override fun onLowMemory() {
-                        mapView.onLowMemory()
+                        mapLifecycleCoordinator.dispatchLowMemory()
                         DiagnosticRepository.log(LogSeverity.WARNING, "MainMapScreen", "Forwarded onLowMemory() to MapView#$mvId", stage = "LOW_MEMORY")
                     }
                     @Suppress("DEPRECATION")
                     override fun onTrimMemory(level: Int) {
                         if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
-                            mapView.onLowMemory()
+                            mapLifecycleCoordinator.dispatchLowMemory()
                         }
                     }
                 }
@@ -545,8 +508,9 @@ fun MainMapScreen(
                     try {
                         context.unregisterComponentCallbacks(memoryCallbacks)
                     } catch (_: Throwable) {}
-                    controller.release()
-                    safeDestroy("COMPOSE_DISPOSAL")
+                    mapLifecycleCoordinator.dispatchDestroy("COMPOSE_DISPOSAL") {
+                        controller.release()
+                    }
                 }
             }
 
