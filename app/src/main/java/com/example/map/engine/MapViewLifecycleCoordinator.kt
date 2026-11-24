@@ -19,6 +19,20 @@ interface MapViewLifecycleTarget {
 }
 
 /**
+ * Diagnostic sink for [MapViewLifecycleCoordinator] lifecycle stage events.
+ * Defaults to [DiagnosticRepository.log] in production and can be intercepted in tests.
+ */
+fun interface MapViewLifecycleDiagnosticSink {
+    fun log(
+        severity: LogSeverity,
+        source: String,
+        description: String,
+        stage: String?,
+        throwable: Throwable?
+    )
+}
+
+/**
  * Production [MapViewLifecycleTarget] adapter delegating directly to MapLibre's [MapView].
  */
 class NativeMapViewLifecycleTarget(
@@ -60,13 +74,23 @@ class NativeMapViewLifecycleTarget(
  * Guarantees that internal Compose disposal while the host Activity remains resumed
  * still dispatches `onPause()` and `onStop()` before `onDestroy()`, executes [beforeDestroy]
  * (e.g., releasing [MapEngineController] and stopping tile acquisition) before native destruction,
- * avoids duplicate `onPause`/`onStop` when the Activity already paused/stopped, and keeps
- * destruction idempotent across overlapping Activity and Compose teardown paths.
+ * avoids duplicate `onPause`/`onStop` when the Activity already paused/stopped, keeps
+ * destruction idempotent (never calling native `onDestroy()` twice, even after partial failure),
+ * and logs `DESTROYING` before teardown and `DESTROYED` only after native `onDestroy()` succeeds
+ * (or `DESTROY_FAILED` with failing stage and throwable without swallowing the exception).
  */
 class MapViewLifecycleCoordinator(
     private val target: MapViewLifecycleTarget,
-    private val viewIdLabel: String = "MapView"
+    private val viewIdLabel: String = "MapView",
+    private val diagnosticSink: MapViewLifecycleDiagnosticSink = defaultDiagnosticSink()
 ) {
+    enum class DestructionState {
+        ACTIVE,
+        DESTROYING,
+        DESTROYED,
+        FAILED
+    }
+
     var isCreated: Boolean = false
         private set
 
@@ -76,61 +100,184 @@ class MapViewLifecycleCoordinator(
     var isResumed: Boolean = false
         private set
 
-    var isDestroyed: Boolean = false
+    var destructionState: DestructionState = DestructionState.ACTIVE
         private set
+
+    val isDestroyed: Boolean
+        get() = destructionState == DestructionState.DESTROYED
+
+    val hasDestroyFailed: Boolean
+        get() = destructionState == DestructionState.FAILED
+
+    val isTerminated: Boolean
+        get() = destructionState != DestructionState.ACTIVE
 
     var destructionReason: String? = null
         private set
 
+    var failureStage: String? = null
+        private set
+
+    var lastDestroyFailure: Throwable? = null
+        private set
+
+    private var nativeDestroyInvoked: Boolean = false
+
     fun dispatchCreate() {
-        if (isDestroyed || isCreated) return
+        if (isTerminated || isCreated) return
         target.onCreate()
         isCreated = true
-        DiagnosticRepository.log(
+        emitDiagnostic(
             severity = LogSeverity.INFO,
-            source = "MainMapScreen",
             description = "MapView 'onCreate()' completed ($viewIdLabel)",
             stage = "MAPVIEW_ONCREATE"
         )
     }
 
     fun dispatchStart() {
-        if (isDestroyed || isStarted) return
+        if (isTerminated || isStarted) return
         if (!isCreated) {
             dispatchCreate()
         }
         target.onStart()
         isStarted = true
-        DiagnosticRepository.log(
+        emitDiagnostic(
             severity = LogSeverity.INFO,
-            source = "MainMapScreen",
             description = "MapView.onStart() dispatched ($viewIdLabel)",
             stage = "LIFECYCLE_STARTED"
         )
     }
 
     fun dispatchResume() {
-        if (isDestroyed || isResumed) return
+        if (isTerminated || isResumed) return
         if (!isStarted) {
             dispatchStart()
         }
         target.onResume()
         isResumed = true
-        DiagnosticRepository.log(
+        emitDiagnostic(
             severity = LogSeverity.INFO,
-            source = "MainMapScreen",
             description = "MapView.onResume() dispatched ($viewIdLabel)",
             stage = "LIFECYCLE_RESUMED"
         )
     }
 
     fun dispatchPause() {
-        if (isDestroyed || !isResumed) return
+        if (isTerminated || !isResumed) return
+        pauseTarget()
+    }
+
+    fun dispatchStop() {
+        if (isTerminated || !isStarted) return
+        if (isResumed) {
+            pauseTarget()
+        }
+        stopTarget()
+    }
+
+    fun dispatchLowMemory() {
+        if (isTerminated || !isCreated) return
+        target.onLowMemory()
+    }
+
+    fun dispatchDestroy(
+        reason: String,
+        beforeDestroy: () -> Unit = {}
+    ): Boolean {
+        if (isTerminated) {
+            emitDiagnostic(
+                severity = LogSeverity.DEBUG,
+                description = "Ignored redundant destruction request from $reason (state=$destructionState, initialReason=$destructionReason)"
+            )
+            return false
+        }
+
+        destructionState = DestructionState.DESTROYING
+        destructionReason = reason
+        emitDiagnostic(
+            severity = LogSeverity.INFO,
+            description = "MapView destruction started by: $reason ($viewIdLabel)",
+            stage = "DESTROYING"
+        )
+
+        var firstFailure: Throwable? = null
+        var firstFailureStage: String? = null
+
+        fun recordFailure(stageName: String, error: Throwable) {
+            if (firstFailure == null) {
+                firstFailure = error
+                firstFailureStage = stageName
+            } else if (error !== firstFailure) {
+                try {
+                    firstFailure?.addSuppressed(error)
+                } catch (_: Throwable) {
+                }
+            }
+        }
+
+        // 1. Release controller & stop tile acquisition BEFORE touching MapView teardown
+        try {
+            beforeDestroy()
+        } catch (e: Throwable) {
+            recordFailure("BEFORE_DESTROY", e)
+        }
+
+        // 2. Satisfy MapLibre MapView contract: onPause() -> onStop() -> onDestroy()
+        if (isResumed) {
+            try {
+                pauseTarget()
+            } catch (e: Throwable) {
+                recordFailure("ON_PAUSE", e)
+            }
+        }
+
+        if (isStarted) {
+            try {
+                stopTarget()
+            } catch (e: Throwable) {
+                recordFailure("ON_STOP", e)
+            }
+        }
+
+        if (!nativeDestroyInvoked) {
+            nativeDestroyInvoked = true
+            try {
+                target.onDestroy()
+            } catch (e: Throwable) {
+                recordFailure("ON_DESTROY", e)
+            } finally {
+                isCreated = false
+            }
+        }
+
+        val failure = firstFailure
+        if (failure != null) {
+            destructionState = DestructionState.FAILED
+            failureStage = firstFailureStage
+            lastDestroyFailure = failure
+            emitDiagnostic(
+                severity = LogSeverity.ERROR,
+                description = "MapView destruction failed at stage $firstFailureStage ($reason) ($viewIdLabel): ${failure.message ?: failure.javaClass.simpleName}",
+                stage = "DESTROY_FAILED",
+                throwable = failure
+            )
+            throw failure
+        }
+
+        destructionState = DestructionState.DESTROYED
+        emitDiagnostic(
+            severity = LogSeverity.INFO,
+            description = "MapView destruction completed by: $reason ($viewIdLabel)",
+            stage = "DESTROYED"
+        )
+        return true
+    }
+
+    private fun pauseTarget() {
         try {
             target.onPause()
-            DiagnosticRepository.log(
+            emitDiagnostic(
                 severity = LogSeverity.INFO,
-                source = "MainMapScreen",
                 description = "MapView.onPause() dispatched ($viewIdLabel)",
                 stage = "LIFECYCLE_PAUSED"
             )
@@ -139,16 +286,11 @@ class MapViewLifecycleCoordinator(
         }
     }
 
-    fun dispatchStop() {
-        if (isDestroyed || !isStarted) return
-        if (isResumed) {
-            dispatchPause()
-        }
+    private fun stopTarget() {
         try {
             target.onStop()
-            DiagnosticRepository.log(
+            emitDiagnostic(
                 severity = LogSeverity.INFO,
-                source = "MainMapScreen",
                 description = "MapView.onStop() dispatched ($viewIdLabel)",
                 stage = "LIFECYCLE_STOPPED"
             )
@@ -157,85 +299,32 @@ class MapViewLifecycleCoordinator(
         }
     }
 
-    fun dispatchLowMemory() {
-        if (isDestroyed || !isCreated) return
-        target.onLowMemory()
+    private fun emitDiagnostic(
+        severity: LogSeverity,
+        description: String,
+        stage: String? = null,
+        throwable: Throwable? = null
+    ) {
+        diagnosticSink.log(
+            severity = severity,
+            source = "MainMapScreen",
+            description = description,
+            stage = stage,
+            throwable = throwable
+        )
     }
 
-    fun dispatchDestroy(
-        reason: String,
-        beforeDestroy: () -> Unit = {}
-    ): Boolean {
-        if (isDestroyed) {
-            DiagnosticRepository.log(
-                severity = LogSeverity.DEBUG,
-                source = "MainMapScreen",
-                description = "Ignored redundant destruction request from $reason (already destroyed by $destructionReason)"
-            )
-            return false
-        }
-
-        destructionReason = reason
-        DiagnosticRepository.log(
-            severity = LogSeverity.INFO,
-            source = "MainMapScreen",
-            description = "MapView destruction initiated by: $reason ($viewIdLabel)",
-            stage = "DESTROYED"
-        )
-
-        // 1. Release controller & stop tile acquisition BEFORE touching MapView teardown
-        try {
-            beforeDestroy()
-        } catch (e: Throwable) {
-            DiagnosticRepository.log(
-                severity = LogSeverity.WARNING,
-                source = "MainMapScreen",
-                description = "Exception in beforeDestroy ($reason): ${e.message}",
-                throwable = e
-            )
-        }
-
-        // 2. Satisfy MapLibre MapView contract: onPause() -> onStop() -> onDestroy()
-        if (isResumed) {
-            try {
-                dispatchPause()
-            } catch (e: Throwable) {
-                isResumed = false
+    companion object {
+        private fun defaultDiagnosticSink(): MapViewLifecycleDiagnosticSink {
+            return MapViewLifecycleDiagnosticSink { severity, source, description, stage, throwable ->
                 DiagnosticRepository.log(
-                    severity = LogSeverity.WARNING,
-                    source = "MainMapScreen",
-                    description = "Exception during MapView.onPause ($reason): ${e.message}",
-                    throwable = e
+                    severity = severity,
+                    source = source,
+                    description = description,
+                    stage = stage,
+                    throwable = throwable
                 )
             }
         }
-
-        if (isStarted) {
-            try {
-                dispatchStop()
-            } catch (e: Throwable) {
-                isStarted = false
-                DiagnosticRepository.log(
-                    severity = LogSeverity.WARNING,
-                    source = "MainMapScreen",
-                    description = "Exception during MapView.onStop ($reason): ${e.message}",
-                    throwable = e
-                )
-            }
-        }
-
-        isDestroyed = true
-        isCreated = false
-        try {
-            target.onDestroy()
-        } catch (e: Throwable) {
-            DiagnosticRepository.log(
-                severity = LogSeverity.WARNING,
-                source = "MainMapScreen",
-                description = "Exception during MapView.onDestroy ($reason): ${e.message}",
-                throwable = e
-            )
-        }
-        return true
     }
 }

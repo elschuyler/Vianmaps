@@ -54,6 +54,7 @@ import com.example.map.activation.MapRuntimeInitializer
 import com.example.map.activation.ProcessMapRuntimeState
 import com.example.map.engine.MapEngineController
 import com.example.map.engine.MapViewLifecycleCoordinator
+import com.example.map.engine.MapViewLifecycleDiagnosticSink
 import com.example.map.engine.MapViewLifecycleTarget
 import com.example.map.source.MapSourceRepository
 import com.example.ui.components.BottomNavigationBar
@@ -78,6 +79,7 @@ import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -1168,6 +1170,7 @@ class MapActivationSeamTest {
         val viewModel = deps.viewModelFactory(app).create(MapViewModel::class.java)
         waitUntilWithMainLooper { viewModel.uiState.value.hasLoadedPreferences }
 
+        // 1. Arrange an earlier preference write deliberately blocked inside DataStore
         val writeEntered = CompletableDeferred<Unit>()
         val gate = CompletableDeferred<Unit>()
         dataStore.onUpdateEntered = writeEntered
@@ -1176,42 +1179,92 @@ class MapActivationSeamTest {
         viewModel.onCameraMoved(40.7128, -74.0060, 12.0, 0.0)
         waitUntilWithMainLooper { writeEntered.isCompleted }
 
+        // 2. Synchronize deterministically on freeze + entering wait for the blocked earlier write
+        val enteredFreezeAndWait = CompletableDeferred<Unit>()
+        viewModel.onAwaitingPendingPreferenceWritesForTesting = {
+            enteredFreezeAndWait.complete(Unit)
+        }
+
         val cancellationObserved = CompletableDeferred<Boolean>()
         val shutdownScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        val job = shutdownScope.launch {
-            try {
-                viewModel.prepareAndFlushForDeactivation()
-                cancellationObserved.complete(false)
-            } catch (_: CancellationException) {
-                cancellationObserved.complete(true)
+        try {
+            val job = shutdownScope.launch {
+                try {
+                    viewModel.prepareAndFlushForDeactivation()
+                    cancellationObserved.complete(false)
+                } catch (_: CancellationException) {
+                    cancellationObserved.complete(true)
+                }
             }
+
+            // Test MUST fail here if cancellation were attempted before freeze-and-wait was reached
+            waitUntilWithMainLooper { enteredFreezeAndWait.isCompleted }
+
+            // 3. Prove BOTH: camera persistence is frozen AND shutdown is actively waiting on the earlier write
+            assertTrue(
+                "Camera persistence must be frozen before cancelling shutdown",
+                viewModel.isCameraPersistenceFrozenForTesting()
+            )
+            assertTrue(
+                "Shutdown job must still be waiting on the blocked earlier write",
+                job.isActive && !job.isCompleted
+            )
+
+            // Probe update while frozen must be rejected and must not mutate camera state
+            viewModel.onCameraMoved(88.8888, -88.8888, 3.0, 90.0)
+            assertEquals(40.7128, viewModel.uiState.value.camera.latitude, 1e-4)
+            assertEquals(-74.0060, viewModel.uiState.value.camera.longitude, 1e-4)
+
+            // 4. Cancel shutdown ONLY now while earlier write is still blocked
+            job.cancel()
+            waitUntilWithMainLooper { cancellationObserved.isCompleted }
+            assertTrue(
+                "CancellationException must propagate cleanly when shutdown is cancelled",
+                runBlocking { cancellationObserved.await() }
+            )
+
+            // 5. Verify active session remains intact and camera persistence unfrozen
+            assertFalse(viewModel.isCleared)
+            assertFalse(
+                "Camera persistence must unfreeze when shutdown is cancelled on active session",
+                viewModel.isCameraPersistenceFrozenForTesting()
+            )
+
+            // 6. Submit newer camera update while earlier stale write is still paused at the gate
+            dataStore.onUpdateEntered = null
+            viewModel.onCameraMoved(41.9028, 12.4964, 14.0, 15.0)
+            assertEquals(41.9028, viewModel.uiState.value.camera.latitude, 1e-4)
+            assertEquals(12.4964, viewModel.uiState.value.camera.longitude, 1e-4)
+
+            // 7. Unblock earlier write and confirm all writes settle with zero deadlock or leaked jobs
+            gate.complete(Unit)
+            dataStore.updateGate = null
+            waitUntilWithMainLooper { viewModel.pendingPreferenceJobCountForTesting() == 0 }
+
+            val finalResultDeferred = CompletableDeferred<Result<Unit>>()
+            shutdownScope.launch {
+                finalResultDeferred.complete(viewModel.prepareAndFlushForDeactivation())
+            }
+            waitUntilWithMainLooper { finalResultDeferred.isCompleted }
+            assertTrue(runBlocking { finalResultDeferred.await() }.isSuccess)
+            assertEquals(0, viewModel.pendingPreferenceJobCountForTesting())
+
+            // 8. Verify DataStore holds the newer camera coordinates and was never overwritten by the earlier write or rejected probe
+            val persisted = runBlocking {
+                deps.preferencesRepository.userPreferencesFlow.first().cameraState
+            }
+            assertEquals(41.9028, persisted.latitude, 1e-4)
+            assertEquals(12.4964, persisted.longitude, 1e-4)
+            assertEquals(14.0, persisted.zoom, 1e-4)
+            assertEquals(15.0, persisted.bearing, 1e-4)
+            assertTrue(dataStore.updateCount.get() >= 2)
+        } finally {
+            viewModel.onAwaitingPendingPreferenceWritesForTesting = null
+            gate.complete(Unit)
+            dataStore.updateGate = null
+            dataStore.onUpdateEntered = null
+            shutdownScope.cancel()
         }
-
-        // Cancel shutdown while awaiting earlier write
-        job.cancel()
-        gate.complete(Unit)
-        dataStore.updateGate = null
-        dataStore.onUpdateEntered = null
-
-        waitUntilWithMainLooper { cancellationObserved.isCompleted }
-        assertTrue(runBlocking { cancellationObserved.await() })
-        assertFalse(viewModel.isCleared)
-
-        // Subsequent camera move on still-active session must still be accepted & persisted cleanly
-        viewModel.onCameraMoved(41.9028, 12.4964, 14.0, 15.0)
-        val finalResultDeferred = CompletableDeferred<Result<Unit>>()
-        shutdownScope.launch {
-            finalResultDeferred.complete(viewModel.prepareAndFlushForDeactivation())
-        }
-        waitUntilWithMainLooper { finalResultDeferred.isCompleted }
-        assertTrue(runBlocking { finalResultDeferred.await() }.isSuccess)
-
-        val persisted = runBlocking {
-            deps.preferencesRepository.userPreferencesFlow.first().cameraState
-        }
-        assertEquals(41.9028, persisted.latitude, 1e-4)
-        assertEquals(12.4964, persisted.longitude, 1e-4)
-        shutdownScope.cancel()
     }
 
     @Test
@@ -1472,6 +1525,10 @@ class MapActivationSeamTest {
         assertEquals(1, events.count { it == "mv1:ON_PAUSE" })
         assertEquals(1, events.count { it == "mv1:ON_STOP" })
         assertEquals(1, events.count { it == "mv1:ON_DESTROY" })
+        val stages = DiagnosticRepository.getSnapshot().mapNotNull { it.stage }
+        assertTrue(stages.contains("DESTROYING"))
+        assertTrue(stages.contains("DESTROYED"))
+        assertTrue(stages.indexOf("DESTROYING") < stages.indexOf("DESTROYED"))
     }
 
     @Test
@@ -1664,5 +1721,262 @@ class MapActivationSeamTest {
             .assertTextContains("Cold-launch renderer unavailable")
         composeTestRule.onNodeWithTag("map_activation_retry_button").assertIsDisplayed()
         composeTestRule.onNodeWithTag("map_activation_open_notes_button").assertIsDisplayed()
+    }
+
+    private class FaultingMapViewTarget(
+        private val id: String,
+        private val events: MutableList<String>,
+        private val failOnPause: Throwable? = null,
+        private val failOnStop: Throwable? = null,
+        private val failOnDestroy: Throwable? = null
+    ) : MapViewLifecycleTarget {
+        override fun onCreate() { events.add("$id:ON_CREATE") }
+        override fun onStart() { events.add("$id:ON_START") }
+        override fun onResume() { events.add("$id:ON_RESUME") }
+        override fun onPause() {
+            events.add("$id:ON_PAUSE")
+            failOnPause?.let { throw it }
+        }
+        override fun onStop() {
+            events.add("$id:ON_STOP")
+            failOnStop?.let { throw it }
+        }
+        override fun onDestroy() {
+            events.add("$id:ON_DESTROY")
+            failOnDestroy?.let { throw it }
+        }
+        override fun onLowMemory() { events.add("$id:ON_LOW_MEMORY") }
+    }
+
+    private fun recordingDiagnosticSink(events: MutableList<String>): MapViewLifecycleDiagnosticSink {
+        return MapViewLifecycleDiagnosticSink { severity, source, description, stage, throwable ->
+            stage?.let { events.add("DIAG:$it") }
+            DiagnosticRepository.log(
+                severity = severity,
+                source = source,
+                description = description,
+                stage = stage,
+                throwable = throwable
+            )
+        }
+    }
+
+    @Test
+    fun ab1_fix_13_successfulDestructionLogsDestroyingBeforeTeardownAndDestroyedOnlyAfterNativeDestroy() {
+        val events = mutableListOf<String>()
+        val coordinator = MapViewLifecycleCoordinator(
+            target = RecordingMapViewTarget("mv1", events),
+            viewIdLabel = "mv1",
+            diagnosticSink = recordingDiagnosticSink(events)
+        )
+
+        coordinator.dispatchCreate()
+        coordinator.dispatchStart()
+        coordinator.dispatchResume()
+
+        val destroyed = coordinator.dispatchDestroy("COMPOSE_DISPOSAL") {
+            events.add("CONTROLLER_RELEASED")
+        }
+
+        assertTrue(destroyed)
+        assertTrue(coordinator.isDestroyed)
+        assertFalse(coordinator.hasDestroyFailed)
+        assertEquals(
+            listOf(
+                "mv1:ON_CREATE", "DIAG:MAPVIEW_ONCREATE",
+                "mv1:ON_START", "DIAG:LIFECYCLE_STARTED",
+                "mv1:ON_RESUME", "DIAG:LIFECYCLE_RESUMED",
+                "DIAG:DESTROYING",
+                "CONTROLLER_RELEASED",
+                "mv1:ON_PAUSE", "DIAG:LIFECYCLE_PAUSED",
+                "mv1:ON_STOP", "DIAG:LIFECYCLE_STOPPED",
+                "mv1:ON_DESTROY",
+                "DIAG:DESTROYED"
+            ),
+            events
+        )
+        val diagEvents = DiagnosticRepository.getSnapshot()
+        assertEquals(1, diagEvents.count { it.stage == "DESTROYING" })
+        assertEquals(1, diagEvents.count { it.stage == "DESTROYED" })
+        assertEquals(0, diagEvents.count { it.stage == "DESTROY_FAILED" })
+    }
+
+    @Test
+    fun ab1_fix_14_beforeDestroyFailureRecordsDestroyFailedWithoutDestroyedAndRethrows() {
+        val events = mutableListOf<String>()
+        val boom = IllegalStateException("Controller release failure")
+        val coordinator = MapViewLifecycleCoordinator(
+            target = RecordingMapViewTarget("mv1", events),
+            viewIdLabel = "mv1",
+            diagnosticSink = recordingDiagnosticSink(events)
+        )
+
+        coordinator.dispatchCreate()
+        coordinator.dispatchStart()
+        coordinator.dispatchResume()
+
+        try {
+            coordinator.dispatchDestroy("COMPOSE_DISPOSAL") {
+                events.add("CONTROLLER_RELEASE_THROWS")
+                throw boom
+            }
+            fail("Expected beforeDestroy exception to propagate")
+        } catch (caught: Throwable) {
+            assertSame(boom, caught)
+        }
+
+        assertFalse(coordinator.isDestroyed)
+        assertTrue(coordinator.hasDestroyFailed)
+        assertEquals("BEFORE_DESTROY", coordinator.failureStage)
+        assertSame(boom, coordinator.lastDestroyFailure)
+        assertFalse(events.contains("DIAG:DESTROYED"))
+        assertEquals(1, events.count { it == "DIAG:DESTROYING" })
+        assertEquals(1, events.count { it == "DIAG:DESTROY_FAILED" })
+        assertTrue(events.indexOf("DIAG:DESTROYING") < events.indexOf("CONTROLLER_RELEASE_THROWS"))
+        assertTrue(events.indexOf("mv1:ON_DESTROY") < events.indexOf("DIAG:DESTROY_FAILED"))
+
+        val failedEvent = DiagnosticRepository.getSnapshot().single { it.stage == "DESTROY_FAILED" }
+        assertEquals(LogSeverity.ERROR, failedEvent.severity)
+        assertTrue(failedEvent.description.contains("BEFORE_DESTROY"))
+        assertTrue(failedEvent.description.contains("COMPOSE_DISPOSAL"))
+        assertTrue(failedEvent.errorDetails?.contains("Controller release failure") == true)
+        assertEquals(0, DiagnosticRepository.getSnapshot().count { it.stage == "DESTROYED" })
+
+        // Repeated teardown after partial failure remains idempotent and does not call onDestroy twice
+        assertFalse(coordinator.dispatchDestroy("ACTIVITY_ON_DESTROY") {
+            events.add("SHOULD_NOT_RUN")
+        })
+        assertEquals(1, events.count { it == "mv1:ON_DESTROY" })
+        assertFalse(events.contains("SHOULD_NOT_RUN"))
+    }
+
+    @Test
+    fun ab1_fix_15_onPauseFailureRecordsDestroyFailedWithoutDestroyedAndRemainsIdempotent() {
+        val events = mutableListOf<String>()
+        val boom = IllegalStateException("Native pause failure")
+        val coordinator = MapViewLifecycleCoordinator(
+            target = FaultingMapViewTarget("mv1", events, failOnPause = boom),
+            viewIdLabel = "mv1",
+            diagnosticSink = recordingDiagnosticSink(events)
+        )
+
+        coordinator.dispatchCreate()
+        coordinator.dispatchStart()
+        coordinator.dispatchResume()
+
+        try {
+            coordinator.dispatchDestroy("COMPOSE_DISPOSAL") {
+                events.add("CONTROLLER_RELEASED")
+            }
+            fail("Expected onPause exception to propagate")
+        } catch (caught: Throwable) {
+            assertSame(boom, caught)
+        }
+
+        assertFalse(coordinator.isDestroyed)
+        assertTrue(coordinator.hasDestroyFailed)
+        assertFalse(coordinator.isResumed)
+        assertFalse(coordinator.isStarted)
+        assertEquals("ON_PAUSE", coordinator.failureStage)
+        assertFalse(events.contains("DIAG:DESTROYED"))
+        assertEquals(1, events.count { it == "DIAG:DESTROYING" })
+        assertEquals(1, events.count { it == "DIAG:DESTROY_FAILED" })
+
+        val failedEvent = DiagnosticRepository.getSnapshot().single { it.stage == "DESTROY_FAILED" }
+        assertTrue(failedEvent.description.contains("ON_PAUSE"))
+        assertTrue(failedEvent.errorDetails?.contains("Native pause failure") == true)
+        assertEquals(0, DiagnosticRepository.getSnapshot().count { it.stage == "DESTROYED" })
+
+        assertFalse(coordinator.dispatchDestroy("ACTIVITY_ON_DESTROY"))
+        assertEquals(1, events.count { it == "mv1:ON_DESTROY" })
+    }
+
+    @Test
+    fun ab1_fix_16_onStopFailureRecordsDestroyFailedWithoutDestroyedAndRemainsIdempotent() {
+        val events = mutableListOf<String>()
+        val boom = IllegalStateException("Native stop failure")
+        val coordinator = MapViewLifecycleCoordinator(
+            target = FaultingMapViewTarget("mv1", events, failOnStop = boom),
+            viewIdLabel = "mv1",
+            diagnosticSink = recordingDiagnosticSink(events)
+        )
+
+        coordinator.dispatchCreate()
+        coordinator.dispatchStart()
+        coordinator.dispatchResume()
+
+        try {
+            coordinator.dispatchDestroy("COMPOSE_DISPOSAL") {
+                events.add("CONTROLLER_RELEASED")
+            }
+            fail("Expected onStop exception to propagate")
+        } catch (caught: Throwable) {
+            assertSame(boom, caught)
+        }
+
+        assertFalse(coordinator.isDestroyed)
+        assertTrue(coordinator.hasDestroyFailed)
+        assertFalse(coordinator.isStarted)
+        assertEquals("ON_STOP", coordinator.failureStage)
+        assertFalse(events.contains("DIAG:DESTROYED"))
+        assertEquals(1, events.count { it == "DIAG:DESTROYING" })
+        assertEquals(1, events.count { it == "DIAG:DESTROY_FAILED" })
+
+        val failedEvent = DiagnosticRepository.getSnapshot().single { it.stage == "DESTROY_FAILED" }
+        assertTrue(failedEvent.description.contains("ON_STOP"))
+        assertTrue(failedEvent.errorDetails?.contains("Native stop failure") == true)
+        assertEquals(0, DiagnosticRepository.getSnapshot().count { it.stage == "DESTROYED" })
+
+        assertFalse(coordinator.dispatchDestroy("ACTIVITY_ON_DESTROY"))
+        assertEquals(1, events.count { it == "mv1:ON_DESTROY" })
+    }
+
+    @Test
+    fun ab1_fix_17_nativeOnDestroyFailureRecordsDestroyFailedWithoutDestroyedAndDoesNotCallOnDestroyTwice() {
+        val events = mutableListOf<String>()
+        val boom = IllegalStateException("Native destroy failure")
+        val coordinator = MapViewLifecycleCoordinator(
+            target = FaultingMapViewTarget("mv1", events, failOnDestroy = boom),
+            viewIdLabel = "mv1",
+            diagnosticSink = recordingDiagnosticSink(events)
+        )
+
+        coordinator.dispatchCreate()
+        coordinator.dispatchStart()
+        coordinator.dispatchResume()
+
+        try {
+            coordinator.dispatchDestroy("ACTIVITY_ON_DESTROY") {
+                events.add("CONTROLLER_RELEASED")
+            }
+            fail("Expected native onDestroy exception to propagate")
+        } catch (caught: Throwable) {
+            assertSame(boom, caught)
+        }
+
+        assertFalse(coordinator.isDestroyed)
+        assertTrue(coordinator.hasDestroyFailed)
+        assertFalse(coordinator.isCreated)
+        assertEquals("ON_DESTROY", coordinator.failureStage)
+        assertFalse(events.contains("DIAG:DESTROYED"))
+        assertEquals(1, events.count { it == "DIAG:DESTROYING" })
+        assertEquals(1, events.count { it == "DIAG:DESTROY_FAILED" })
+        assertTrue(events.indexOf("DIAG:DESTROYING") < events.indexOf("mv1:ON_DESTROY"))
+        assertTrue(events.indexOf("mv1:ON_DESTROY") < events.indexOf("DIAG:DESTROY_FAILED"))
+
+        val failedEvent = DiagnosticRepository.getSnapshot().single { it.stage == "DESTROY_FAILED" }
+        assertTrue(failedEvent.description.contains("ON_DESTROY"))
+        assertTrue(failedEvent.description.contains("ACTIVITY_ON_DESTROY"))
+        assertTrue(failedEvent.errorDetails?.contains("Native destroy failure") == true)
+        assertEquals(0, DiagnosticRepository.getSnapshot().count { it.stage == "DESTROYED" })
+
+        // Repeated destruction after native onDestroy failed MUST remain idempotent and never invoke target.onDestroy() twice
+        assertFalse(coordinator.dispatchDestroy("COMPOSE_DISPOSAL") {
+            events.add("CTRL_SHOULD_NOT_RUN")
+        })
+        assertEquals(1, events.count { it == "mv1:ON_DESTROY" })
+        assertEquals(1, events.count { it == "DIAG:DESTROYING" })
+        assertEquals(1, events.count { it == "DIAG:DESTROY_FAILED" })
+        assertFalse(events.contains("CTRL_SHOULD_NOT_RUN"))
     }
 }

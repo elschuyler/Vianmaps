@@ -207,6 +207,15 @@ class MapViewModel(
     internal var isCleared: Boolean = false
         private set
 
+    @Volatile
+    internal var onAwaitingPendingPreferenceWritesForTesting: (() -> Unit)? = null
+
+    internal fun isCameraPersistenceFrozenForTesting(): Boolean = cameraPersistenceFrozen.get()
+
+    internal fun pendingPreferenceJobCountForTesting(): Int = synchronized(pendingPrefJobsLock) {
+        pendingPreferenceJobs.size
+    }
+
     fun hasSessionCameraOverride(): Boolean = hasLocalCameraOverride.get()
 
     fun createMapEngineController(
@@ -460,6 +469,9 @@ class MapViewModel(
         }
 
         return try {
+            if (jobsSnapshot.any { it.isActive }) {
+                onAwaitingPendingPreferenceWritesForTesting?.invoke()
+            }
             jobsSnapshot.forEach { job ->
                 if (job.isActive) {
                     job.join()
